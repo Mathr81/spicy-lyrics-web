@@ -66,17 +66,58 @@ The page picks a mode automatically:
 
 The status line under the top bar tells you which mode is active.
 
+## Auto-deploy (GitHub Pages)
+
+`.github/workflows/deploy-web.yml` builds `web/` and publishes `web/dist/` to
+GitHub Pages on every push to `main`. One-time setup:
+
+1. **Settings → Pages → Source: GitHub Actions.**
+2. **Settings → Secrets and variables → Actions → Variables**, add:
+   - `VITE_SPOTIFY_CLIENT_ID` — your Spotify Client ID
+   - `VITE_SPOTIFY_REDIRECT_URI` — your Pages URL, e.g.
+     `https://<user>.github.io/<repo>/` (**with** the trailing slash)
+   - `VITE_LYRICS_API` — (optional) your proxy URL, see below
+3. Add that same redirect URI in your Spotify app settings.
+
+Then push to `main` (or run the workflow manually) and it deploys itself.
+
 ## Demo mode
 
 Append `?demo` to the URL to preview the animated lyrics with a built-in sample —
 no Spotify login required. Handy for checking your deployment.
 
-## CORS
+## API access — CORS & required headers (the proxy)
 
-Browsers enforce CORS on the lyrics request. If `api.spicylyrics.org` does not
-return permissive CORS headers for your origin, the lyrics fetch will fail in the
-browser console. Workaround: run a tiny CORS proxy you control and point
-`VITE_LYRICS_API` at it.
+The lyrics API is built for the Spotify desktop client and expects request
+headers a browser **cannot** set from a web page — `Origin`, `Referer` and
+`User-Agent` are "forbidden headers" the browser controls itself. It may also not
+send CORS headers for your hosting origin. So a direct browser call can be
+rejected.
+
+The fix is the included **Cloudflare Worker proxy** (`web/proxy/`), which injects
+the expected headers server-side and adds permissive CORS:
+
+```bash
+cd web/proxy
+npx wrangler login      # first time only
+npx wrangler deploy     # prints https://spicy-lyrics-proxy.<you>.workers.dev
+```
+
+Then set `VITE_LYRICS_API` to that Worker URL (as a GitHub Actions Variable, or
+in your local build env) and rebuild. The page will send its requests through the
+Worker, which forwards them to `api.spicylyrics.org` with:
+
+- `Origin: https://xpui.app.spotify.com`
+- `Referer: https://xpui.app.spotify.com/`
+- a Spotify-client `User-Agent`
+- `SpicyLyrics-Version: 6.2.3`
+
+and passes your `SpicyLyrics-WebAuth` Bearer token straight through (never logged
+or stored). Any equivalent serverless function (Vercel/Netlify) works too — just
+mirror `web/proxy/worker.js`.
+
+> If `api.spicylyrics.org` happens to allow your origin directly, you can skip the
+> proxy and leave `VITE_LYRICS_API` unset — but the proxy is the reliable path.
 
 ## How it works (architecture)
 

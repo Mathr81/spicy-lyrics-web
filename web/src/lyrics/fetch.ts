@@ -23,7 +23,12 @@ export async function fetchLyrics(trackId: string): Promise<LyricsResult> {
   try {
     res = await fetch(`${LYRICS_API}/query`, {
       method: "POST",
+      // Note: browsers forbid setting `Origin`, `Referer` and `User-Agent` from
+      // fetch. If the API requires the Spotify-client values for those, route
+      // LYRICS_API through the bundled proxy (web/proxy/), which injects them
+      // server-side. These are the headers we CAN set from the page.
       headers: {
+        Accept: "*/*",
         "Content-Type": "application/json",
         "SpicyLyrics-Version": CLIENT_VERSION,
         "X-mode": "2",
