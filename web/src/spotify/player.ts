@@ -1,0 +1,266 @@
+// Unified playback adapter.
+//
+// Two backends behind one interface:
+//  - "sdk"      : Spotify Web Playback SDK — plays audio in this tab (desktop).
+//  - "connect"  : mirrors whatever device is playing via GET /me/player polling
+//                 (the only option that works on iPad/iOS Safari).
+//
+// Both feed the same `SpotifyPlayer` shim state (position + track), which the
+// reused rendering engine reads every animation frame.
+import { SDK_SUPPORTED } from "../config.ts";
+import { getAccessToken } from "./auth.ts";
+import {
+  getPlaybackState,
+  transferPlayback,
+  playTrack as apiPlayTrack,
+  pause as apiPause,
+  resume as apiResume,
+  seek as apiSeek,
+  next as apiNext,
+  previous as apiPrevious,
+  type SimpleTrack,
+} from "./api.ts";
+import { pushPlaybackState, setPlaying } from "../shim/SpotifyPlayer.ts";
+
+export type PlaybackMode = "sdk" | "connect";
+
+export interface AdapterSnapshot {
+  track: SimpleTrack | null;
+  isPlaying: boolean;
+  positionMs: number;
+  deviceName: string | null;
+  mode: PlaybackMode;
+}
+
+type UpdateListener = (snap: AdapterSnapshot) => void;
+
+let mode: PlaybackMode = "connect";
+let sdkPlayer: any = null;
+let sdkDeviceId: string | null = null;
+let connectTimer: number | null = null;
+let sdkPollTimer: number | null = null;
+const listeners = new Set<UpdateListener>();
+let last: AdapterSnapshot = {
+  track: null,
+  isPlaying: false,
+  positionMs: 0,
+  deviceName: null,
+  mode: "connect",
+};
+
+export function onUpdate(cb: UpdateListener): () => void {
+  listeners.add(cb);
+  return () => listeners.delete(cb);
+}
+
+export function getMode(): PlaybackMode {
+  return mode;
+}
+
+export function getSdkDeviceId(): string | null {
+  return sdkDeviceId;
+}
+
+function emit(snap: AdapterSnapshot): void {
+  last = snap;
+  pushPlaybackState({
+    positionMs: snap.positionMs,
+    isPlaying: snap.isPlaying,
+    track: snap.track
+      ? {
+          uri: snap.track.uri,
+          id: snap.track.id,
+          name: snap.track.name,
+          artists: snap.track.artists,
+          cover: snap.track.cover,
+          durationMs: snap.track.durationMs,
+        }
+      : undefined,
+  });
+  for (const l of listeners) l(snap);
+}
+
+// ---------------------------------------------------------------------------
+// Web Playback SDK
+// ---------------------------------------------------------------------------
+function loadSdkScript(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if ((window as any).Spotify?.Player) return resolve();
+    (window as any).onSpotifyWebPlaybackSDKReady = () => resolve();
+    const script = document.createElement("script");
+    script.src = "https://sdk.scdn.co/spotify-player.js";
+    script.async = true;
+    script.onerror = () => reject(new Error("Failed to load Spotify Web Playback SDK"));
+    document.head.appendChild(script);
+  });
+}
+
+function sdkTrackToSimple(t: any): SimpleTrack | null {
+  if (!t) return null;
+  return {
+    uri: t.uri,
+    id: t.id ?? (t.uri?.split(":")[2] ?? ""),
+    name: t.name,
+    artists: (t.artists ?? []).map((a: any) => ({
+      name: a.name,
+      uri: a.uri,
+      type: "artist" as const,
+    })),
+    cover: t.album?.images?.[0]?.url ?? null,
+    durationMs: t.duration_ms ?? 0,
+  };
+}
+
+async function initSdk(): Promise<boolean> {
+  await loadSdkScript();
+  return new Promise<boolean>((resolve) => {
+    const Spotify = (window as any).Spotify;
+    sdkPlayer = new Spotify.Player({
+      name: "Spicy Lyrics (Web)",
+      getOAuthToken: (cb: (t: string) => void) => {
+        void getAccessToken().then((t) => cb(t ?? ""));
+      },
+      volume: 0.8,
+    });
+
+    sdkPlayer.addListener("ready", ({ device_id }: { device_id: string }) => {
+      sdkDeviceId = device_id;
+      resolve(true);
+    });
+    sdkPlayer.addListener("not_ready", () => {
+      /* device went offline */
+    });
+    sdkPlayer.addListener("initialization_error", () => resolve(false));
+    sdkPlayer.addListener("authentication_error", () => resolve(false));
+    sdkPlayer.addListener("account_error", () => resolve(false));
+
+    sdkPlayer.addListener("player_state_changed", (state: any) => {
+      if (!state) return;
+      emit({
+        track: sdkTrackToSimple(state.track_window?.current_track),
+        isPlaying: !state.paused,
+        positionMs: state.position ?? 0,
+        deviceName: "This browser",
+        mode: "sdk",
+      });
+    });
+
+    void sdkPlayer.connect();
+
+    // Re-anchor position periodically so the clock stays tight during long lines.
+    sdkPollTimer = window.setInterval(async () => {
+      const state = await sdkPlayer.getCurrentState();
+      if (!state) return;
+      emit({
+        track: sdkTrackToSimple(state.track_window?.current_track),
+        isPlaying: !state.paused,
+        positionMs: state.position ?? 0,
+        deviceName: "This browser",
+        mode: "sdk",
+      });
+    }, 1000);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Spotify Connect mirror (polling)
+// ---------------------------------------------------------------------------
+function startConnectPolling(): void {
+  const poll = async () => {
+    try {
+      const snap = await getPlaybackState();
+      if (snap) {
+        emit({
+          track: snap.track,
+          isPlaying: snap.isPlaying,
+          positionMs: snap.progressMs,
+          deviceName: snap.deviceName,
+          mode: "connect",
+        });
+      } else {
+        emit({ track: null, isPlaying: false, positionMs: 0, deviceName: null, mode: "connect" });
+      }
+    } catch (err) {
+      console.warn("[SpicyLyrics] playback poll failed", err);
+    }
+  };
+  void poll();
+  connectTimer = window.setInterval(poll, 1000);
+}
+
+// ---------------------------------------------------------------------------
+// Public control surface
+// ---------------------------------------------------------------------------
+export async function initPlayer(preferSdk: boolean): Promise<PlaybackMode> {
+  if (preferSdk && SDK_SUPPORTED) {
+    try {
+      const ok = await initSdk();
+      if (ok) {
+        mode = "sdk";
+        // Move playback to this browser device so audio plays here.
+        if (sdkDeviceId) {
+          try {
+            await transferPlayback(sdkDeviceId, false);
+          } catch {
+            /* user can start playback manually */
+          }
+        }
+        wireControlHooks();
+        return mode;
+      }
+    } catch (err) {
+      console.warn("[SpicyLyrics] SDK init failed, falling back to Connect", err);
+    }
+  }
+  mode = "connect";
+  startConnectPolling();
+  wireControlHooks();
+  return mode;
+}
+
+export async function play(uri: string): Promise<void> {
+  if (mode === "sdk" && sdkDeviceId) {
+    await apiPlayTrack(uri, sdkDeviceId);
+  } else {
+    await apiPlayTrack(uri);
+  }
+}
+
+export async function togglePlay(): Promise<void> {
+  if (mode === "sdk" && sdkPlayer) {
+    await sdkPlayer.togglePlay();
+    return;
+  }
+  if (last.isPlaying) await apiPause();
+  else await apiResume();
+}
+
+export async function seekTo(positionMs: number): Promise<void> {
+  if (mode === "sdk" && sdkPlayer) {
+    await sdkPlayer.seek(positionMs);
+  } else {
+    await apiSeek(positionMs);
+  }
+  // Optimistic re-anchor for instant lyric response.
+  emit({ ...last, positionMs });
+}
+
+export async function skipNext(): Promise<void> {
+  if (mode === "sdk" && sdkPlayer) await sdkPlayer.nextTrack();
+  else await apiNext();
+}
+
+export async function skipPrev(): Promise<void> {
+  if (mode === "sdk" && sdkPlayer) await sdkPlayer.previousTrack();
+  else await apiPrevious();
+}
+
+function wireControlHooks(): void {
+  (window as any).__spicySeek = (ms: number) => void seekTo(ms);
+  (window as any).__spicyPause = () => void (mode === "sdk" ? sdkPlayer?.pause() : apiPause());
+  (window as any).__spicyPlay = () => void (mode === "sdk" ? sdkPlayer?.resume() : apiResume());
+  (window as any).__spicyToggle = () => void togglePlay();
+  (window as any).__spicyNext = () => void skipNext();
+  (window as any).__spicyPrev = () => void skipPrev();
+  void setPlaying; // keep import referenced if unused paths are tree-shaken
+}

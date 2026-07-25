@@ -1,0 +1,6 @@
+name = "spicy-lyrics-proxy"
+main = "worker.js"
+compatibility_date = "2024-11-01"
+
+# Deploy with:  npx wrangler deploy
+# Then set VITE_LYRICS_API to the printed https://spicy-lyrics-proxy.<subdomain>.workers.dev URL.

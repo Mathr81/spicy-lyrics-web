@@ -1,0 +1,62 @@
+name: Deploy web to GitHub Pages
+
+# Builds web/ and publishes web/dist to GitHub Pages.
+#
+# One-time setup:
+#   1. Repo Settings → Pages → Source: "GitHub Actions".
+#   2. Repo Settings → Secrets and variables → Actions → Variables, add:
+#        VITE_SPOTIFY_CLIENT_ID     your Spotify app Client ID
+#        VITE_SPOTIFY_REDIRECT_URI  your Pages URL, e.g.
+#                                   https://<user>.github.io/<repo>/  (trailing slash!)
+#        VITE_LYRICS_API            (optional) your Cloudflare Worker proxy URL
+#   3. Add that same VITE_SPOTIFY_REDIRECT_URI as a Redirect URI in your Spotify app.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build web
+        env:
+          VITE_SPOTIFY_CLIENT_ID: ${{ vars.VITE_SPOTIFY_CLIENT_ID }}
+          VITE_SPOTIFY_REDIRECT_URI: ${{ vars.VITE_SPOTIFY_REDIRECT_URI }}
+          VITE_LYRICS_API: ${{ vars.VITE_LYRICS_API }}
+        run: bun run web:build
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

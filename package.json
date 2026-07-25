@@ -5,6 +5,9 @@
     "sc": "spicetify-creator",
     "dev": "spicetify-creator dev",
     "build": "spicetify-creator build",
+    "web:dev": "vite",
+    "web:build": "vite build",
+    "web:preview": "vite preview",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
     "fmt": "oxfmt"
@@ -36,7 +39,9 @@
     "@types/d3-ease": "^3.0.2",
     "@types/semver": "^7.7.1",
     "oxfmt": "^0.41.0",
-    "oxlint": "^1.67.0"
+    "oxlint": "^1.67.0",
+    "sass": "^1.102.0",
+    "vite": "5"
   },
   "peerDependencies": {
     "typescript": "^5.9.3"
