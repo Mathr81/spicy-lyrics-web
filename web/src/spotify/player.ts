@@ -35,8 +35,13 @@ export interface AdapterSnapshot {
 type UpdateListener = (snap: AdapterSnapshot) => void;
 
 let mode: PlaybackMode = "connect";
+let sdkAttemptedAndFailed = false;
 let sdkPlayer: any = null;
 let sdkDeviceId: string | null = null;
+
+export function didSdkFail(): boolean {
+  return sdkAttemptedAndFailed;
+}
 let connectTimer: number | null = null;
 let sdkPollTimer: number | null = null;
 const listeners = new Set<UpdateListener>();
@@ -114,6 +119,17 @@ function sdkTrackToSimple(t: any): SimpleTrack | null {
 async function initSdk(): Promise<boolean> {
   await loadSdkScript();
   return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolve(ok);
+    };
+    // If the SDK can't reach Spotify's realtime "dealer" WebSocket (commonly
+    // blocked by ad/privacy blockers) neither `ready` nor an error event fires,
+    // so cap the wait and fall back to Connect mirror mode.
+    const timeout = window.setTimeout(() => finish(false), 9000);
+
     const Spotify = (window as any).Spotify;
     sdkPlayer = new Spotify.Player({
       name: "Spicy Lyrics (Web)",
@@ -125,14 +141,24 @@ async function initSdk(): Promise<boolean> {
 
     sdkPlayer.addListener("ready", ({ device_id }: { device_id: string }) => {
       sdkDeviceId = device_id;
-      resolve(true);
+      window.clearTimeout(timeout);
+      finish(true);
     });
     sdkPlayer.addListener("not_ready", () => {
       /* device went offline */
     });
-    sdkPlayer.addListener("initialization_error", () => resolve(false));
-    sdkPlayer.addListener("authentication_error", () => resolve(false));
-    sdkPlayer.addListener("account_error", () => resolve(false));
+    sdkPlayer.addListener("initialization_error", () => {
+      window.clearTimeout(timeout);
+      finish(false);
+    });
+    sdkPlayer.addListener("authentication_error", () => {
+      window.clearTimeout(timeout);
+      finish(false);
+    });
+    sdkPlayer.addListener("account_error", () => {
+      window.clearTimeout(timeout);
+      finish(false);
+    });
 
     sdkPlayer.addListener("player_state_changed", (state: any) => {
       if (!state) return;
@@ -208,7 +234,9 @@ export async function initPlayer(preferSdk: boolean): Promise<PlaybackMode> {
         wireControlHooks();
         return mode;
       }
+      sdkAttemptedAndFailed = true;
     } catch (err) {
+      sdkAttemptedAndFailed = true;
       console.warn("[SpicyLyrics] SDK init failed, falling back to Connect", err);
     }
   }
