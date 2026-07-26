@@ -18,7 +18,10 @@ import {
   seek as apiSeek,
   next as apiNext,
   previous as apiPrevious,
+  setShuffle as apiSetShuffle,
+  setRepeat as apiSetRepeat,
   type SimpleTrack,
+  type RepeatMode,
 } from "./api.ts";
 import { pushPlaybackState, setPlaying } from "../shim/SpotifyPlayer.ts";
 
@@ -30,13 +33,20 @@ export interface AdapterSnapshot {
   positionMs: number;
   deviceName: string | null;
   mode: PlaybackMode;
+  shuffle: boolean;
+  repeat: RepeatMode;
 }
 
 type UpdateListener = (snap: AdapterSnapshot) => void;
 
 let mode: PlaybackMode = "connect";
+let sdkAttemptedAndFailed = false;
 let sdkPlayer: any = null;
 let sdkDeviceId: string | null = null;
+
+export function didSdkFail(): boolean {
+  return sdkAttemptedAndFailed;
+}
 let connectTimer: number | null = null;
 let sdkPollTimer: number | null = null;
 const listeners = new Set<UpdateListener>();
@@ -46,7 +56,13 @@ let last: AdapterSnapshot = {
   positionMs: 0,
   deviceName: null,
   mode: "connect",
+  shuffle: false,
+  repeat: "off",
 };
+
+function repeatFromMode(m: number | undefined): RepeatMode {
+  return m === 2 ? "track" : m === 1 ? "context" : "off";
+}
 
 export function onUpdate(cb: UpdateListener): () => void {
   listeners.add(cb);
@@ -55,6 +71,14 @@ export function onUpdate(cb: UpdateListener): () => void {
 
 export function getMode(): PlaybackMode {
   return mode;
+}
+
+export function getSnapshot(): AdapterSnapshot {
+  return last;
+}
+
+export function isPlaying(): boolean {
+  return last.isPlaying;
 }
 
 export function getSdkDeviceId(): string | null {
@@ -114,6 +138,17 @@ function sdkTrackToSimple(t: any): SimpleTrack | null {
 async function initSdk(): Promise<boolean> {
   await loadSdkScript();
   return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolve(ok);
+    };
+    // If the SDK can't reach Spotify's realtime "dealer" WebSocket (commonly
+    // blocked by ad/privacy blockers) neither `ready` nor an error event fires,
+    // so cap the wait and fall back to Connect mirror mode.
+    const timeout = window.setTimeout(() => finish(false), 9000);
+
     const Spotify = (window as any).Spotify;
     sdkPlayer = new Spotify.Player({
       name: "Spicy Lyrics (Web)",
@@ -125,14 +160,24 @@ async function initSdk(): Promise<boolean> {
 
     sdkPlayer.addListener("ready", ({ device_id }: { device_id: string }) => {
       sdkDeviceId = device_id;
-      resolve(true);
+      window.clearTimeout(timeout);
+      finish(true);
     });
     sdkPlayer.addListener("not_ready", () => {
       /* device went offline */
     });
-    sdkPlayer.addListener("initialization_error", () => resolve(false));
-    sdkPlayer.addListener("authentication_error", () => resolve(false));
-    sdkPlayer.addListener("account_error", () => resolve(false));
+    sdkPlayer.addListener("initialization_error", () => {
+      window.clearTimeout(timeout);
+      finish(false);
+    });
+    sdkPlayer.addListener("authentication_error", () => {
+      window.clearTimeout(timeout);
+      finish(false);
+    });
+    sdkPlayer.addListener("account_error", () => {
+      window.clearTimeout(timeout);
+      finish(false);
+    });
 
     sdkPlayer.addListener("player_state_changed", (state: any) => {
       if (!state) return;
@@ -142,6 +187,8 @@ async function initSdk(): Promise<boolean> {
         positionMs: state.position ?? 0,
         deviceName: "This browser",
         mode: "sdk",
+        shuffle: !!state.shuffle,
+        repeat: repeatFromMode(state.repeat_mode),
       });
     });
 
@@ -157,6 +204,8 @@ async function initSdk(): Promise<boolean> {
         positionMs: state.position ?? 0,
         deviceName: "This browser",
         mode: "sdk",
+        shuffle: !!state.shuffle,
+        repeat: repeatFromMode(state.repeat_mode),
       });
     }, 1000);
   });
@@ -176,9 +225,19 @@ function startConnectPolling(): void {
           positionMs: snap.progressMs,
           deviceName: snap.deviceName,
           mode: "connect",
+          shuffle: snap.shuffle,
+          repeat: snap.repeat,
         });
       } else {
-        emit({ track: null, isPlaying: false, positionMs: 0, deviceName: null, mode: "connect" });
+        emit({
+          track: null,
+          isPlaying: false,
+          positionMs: 0,
+          deviceName: null,
+          mode: "connect",
+          shuffle: false,
+          repeat: "off",
+        });
       }
     } catch (err) {
       console.warn("[SpicyLyrics] playback poll failed", err);
@@ -208,7 +267,9 @@ export async function initPlayer(preferSdk: boolean): Promise<PlaybackMode> {
         wireControlHooks();
         return mode;
       }
+      sdkAttemptedAndFailed = true;
     } catch (err) {
+      sdkAttemptedAndFailed = true;
       console.warn("[SpicyLyrics] SDK init failed, falling back to Connect", err);
     }
   }
@@ -253,6 +314,27 @@ export async function skipNext(): Promise<void> {
 export async function skipPrev(): Promise<void> {
   if (mode === "sdk" && sdkPlayer) await sdkPlayer.previousTrack();
   else await apiPrevious();
+}
+
+export async function toggleShuffle(): Promise<void> {
+  const next = !last.shuffle;
+  emit({ ...last, shuffle: next }); // optimistic
+  try {
+    await apiSetShuffle(next);
+  } catch (err) {
+    console.warn("[SpicyLyrics] shuffle toggle failed", err);
+  }
+}
+
+export async function cycleRepeat(): Promise<void> {
+  const order: RepeatMode[] = ["off", "context", "track"];
+  const next = order[(order.indexOf(last.repeat) + 1) % order.length];
+  emit({ ...last, repeat: next }); // optimistic
+  try {
+    await apiSetRepeat(next);
+  } catch (err) {
+    console.warn("[SpicyLyrics] repeat cycle failed", err);
+  }
 }
 
 function wireControlHooks(): void {

@@ -25,6 +25,8 @@ import {
   skipNext,
   skipPrev,
   play,
+  getMode,
+  didSdkFail,
   type AdapterSnapshot,
 } from "./spotify/player.ts";
 import { searchTracks, type SimpleTrack } from "./spotify/api.ts";
@@ -33,6 +35,7 @@ import { applyLyrics, clearLyrics } from "./lyrics/apply.ts";
 import { buildPage, updateNowBar, showLoader, showNotice } from "./renderer.ts";
 import { renderShell, type ShellHandle } from "./ui.ts";
 import { $romanization } from "@src/utils/uiState.ts";
+import LoadFonts, { ApplyFontPixel } from "@src/components/Styling/Fonts.ts";
 import Fullscreen from "./shim/Fullscreen.ts";
 
 const NOTICES: Record<string, string> = {
@@ -50,6 +53,10 @@ async function main(): Promise<void> {
   const root = document.getElementById("SpicyLyricsRoot") as HTMLElement;
   buildPage(root);
 
+  // Load the Spicy Lyrics webfont (same source as the extension).
+  LoadFonts();
+  ApplyFontPixel();
+
   shell = renderShell(root, {
     onLogin: () => void login(),
     onLogout: () => {
@@ -62,6 +69,12 @@ async function main(): Promise<void> {
         await play(track.uri);
       } catch (err) {
         console.warn("[SpicyLyrics] play failed", err);
+        if (getMode() === "connect") {
+          shell.setStatus(
+            "Impossible de lancer la lecture ici : ouvre Spotify sur un appareil, " +
+              "lance ce titre, et la page se synchronisera automatiquement."
+          );
+        }
       }
       // Load lyrics immediately; playback state will catch up.
       currentTrackUri = track.uri;
@@ -106,6 +119,13 @@ async function main(): Promise<void> {
   shell.setLoggedIn(true);
   const mode = await initPlayer(true);
   shell.setMode(mode, null);
+
+  if (mode === "connect" && didSdkFail()) {
+    shell.setStatus(
+      "Lecture dans l'onglet indisponible (bloqueur de pub ? Spotify SDK bloqué). " +
+        "Lance la lecture sur un appareil Spotify — la page suivra en miroir."
+    );
+  }
 
   onUpdate(handleSnapshot);
 }

@@ -55,11 +55,15 @@ export async function searchTracks(query: string): Promise<SimpleTrack[]> {
   return (json.tracks?.items ?? []).map(toSimpleTrack);
 }
 
+export type RepeatMode = "off" | "context" | "track";
+
 export interface PlaybackSnapshot {
   isPlaying: boolean;
   progressMs: number;
   track: SimpleTrack | null;
   deviceName: string | null;
+  shuffle: boolean;
+  repeat: RepeatMode;
 }
 
 /** GET /me/player — the source of truth for Spotify Connect mirror mode. */
@@ -74,6 +78,8 @@ export async function getPlaybackState(): Promise<PlaybackSnapshot | null> {
     progressMs: json.progress_ms ?? 0,
     track: toSimpleTrack(json.item),
     deviceName: json.device?.name ?? null,
+    shuffle: !!json.shuffle_state,
+    repeat: (json.repeat_state ?? "off") as RepeatMode,
   };
 }
 
@@ -110,4 +116,13 @@ export async function next(): Promise<void> {
 
 export async function previous(): Promise<void> {
   await req("/me/player/previous", { method: "POST" });
+}
+
+export async function setShuffle(state: boolean): Promise<void> {
+  await req(`/me/player/shuffle?state=${state}`, { method: "PUT" });
+}
+
+// state: "off" | "context" | "track"
+export async function setRepeat(state: "off" | "context" | "track"): Promise<void> {
+  await req(`/me/player/repeat?state=${state}`, { method: "PUT" });
 }
