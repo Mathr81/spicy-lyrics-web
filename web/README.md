@@ -101,6 +101,7 @@ the expected headers server-side and adds permissive CORS:
 cd web/proxy
 npm install             # isolated: uses web/proxy/package.json, not the repo root
 npx wrangler login      # first time only — opens the browser
+npx wrangler secret put SP_DC   # (recommended) see "Synced lyrics" below
 npx wrangler deploy     # prints https://spicy-lyrics-proxy.<you>.workers.dev
 ```
 
@@ -125,6 +126,34 @@ mirror `web/proxy/worker.js`.
 
 > If `api.spicylyrics.org` happens to allow your origin directly, you can skip the
 > proxy and leave `VITE_LYRICS_API` unset — but the proxy is the reliable path.
+
+## Synced lyrics (the `SP_DC` secret)
+
+Spotify's **synced** (word/line-timed) lyrics come from an internal endpoint that
+only accepts Spotify's **web-player client token**. The extension has one (the
+desktop client mints it); a third-party OAuth app token — which is all a website
+can obtain — is **not** accepted there, so without extra setup the API can only
+return plain **unsynced text**.
+
+To get synced lyrics, the proxy mints a web-player token from your Spotify
+account cookie `sp_dc`, server-side:
+
+1. Log in to <https://open.spotify.com> in your browser.
+2. DevTools → **Application → Cookies → https://open.spotify.com** → copy the
+   value of the **`sp_dc`** cookie (a long string).
+3. Store it as a Worker secret (it never reaches the browser, never gets logged):
+   ```bash
+   cd web/proxy
+   npx wrangler secret put SP_DC   # paste the value when prompted
+   npx wrangler deploy
+   ```
+
+`sp_dc` is long-lived (months) — treat it like a password. If lyrics go back to
+text-only, the cookie has expired; repeat the steps.
+
+> Heads-up: this uses Spotify's unofficial `get_access_token` endpoint. Spotify
+> occasionally tightens it (anti-scraping/TOTP); if a valid cookie stops
+> minting a token, the endpoint call in `web/proxy/worker.js` may need updating.
 
 ## How it works (architecture)
 

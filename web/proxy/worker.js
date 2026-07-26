@@ -1,22 +1,34 @@
-// Cloudflare Worker — CORS + header-injecting proxy for the Spicy Lyrics API.
+// Cloudflare Worker — CORS + header/token proxy for the Spicy Lyrics API.
 //
-// Why this exists: a browser cannot set the `Origin`, `Referer` or `User-Agent`
-// request headers (they're "forbidden headers"), and the lyrics API expects the
-// Spotify-client values for them. It also may not send CORS headers for your
-// hosting origin. This Worker sits between the page and the API: it injects the
-// expected headers server-side and adds permissive CORS so the browser is happy.
+// Two jobs:
 //
-// Deploy (see web/proxy/README or the main README):
-//   1. cd web/proxy && npx wrangler deploy
-//   2. Point the site at it:  VITE_LYRICS_API=https://<your-worker>.workers.dev
+// 1. Inject the request headers a browser can't set (Origin/Referer/User-Agent)
+//    and add permissive CORS, so the page can reach the API at all.
 //
-// The user's Spotify Bearer token passes through in the `SpicyLyrics-WebAuth`
-// header. This Worker never logs or stores it.
+// 2. **Synced lyrics token.** Spotify's synced-lyrics endpoint is gated to the
+//    official web-player client token — a third-party OAuth app token (what the
+//    page gets) only unlocks plain text. So if you set an `SP_DC` secret (your
+//    Spotify account cookie), the Worker mints a *web-player* access token from
+//    it server-side and uses THAT as the lyrics bearer. The cookie never touches
+//    the browser and is never logged.
+//
+// Setup:
+//   cd web/proxy
+//   npm install
+//   npx wrangler secret put SP_DC     # paste your sp_dc cookie value
+//   npx wrangler deploy
+//
+// Getting sp_dc: log in to https://open.spotify.com in a browser →
+//   DevTools → Application → Cookies → https://open.spotify.com →
+//   copy the value of the `sp_dc` cookie. It is long-lived; treat it as a
+//   password. Without SP_DC the Worker still proxies, but lyrics stay text-only.
 
 const API_ORIGIN = "https://api.spicylyrics.org";
 const SPOTIFY_ORIGIN = "https://xpui.app.spotify.com";
 const SPOTIFY_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.179 Spotify/1.2.94.583 Safari/537.36";
+const TOKEN_ENDPOINT =
+  "https://open.spotify.com/get_access_token?reason=transport&productType=web_player";
 
 function corsHeaders(request) {
   const origin = request.headers.get("Origin") || "*";
@@ -30,8 +42,40 @@ function corsHeaders(request) {
   };
 }
 
+// Cache the minted web-player token for the life of the isolate.
+let cachedToken = null; // { accessToken, expiresAt }
+
+async function getWebPlayerToken(env) {
+  if (!env || !env.SP_DC) return null;
+  if (cachedToken && Date.now() < cachedToken.expiresAt - 60_000) {
+    return cachedToken.accessToken;
+  }
+  try {
+    const res = await fetch(TOKEN_ENDPOINT, {
+      headers: {
+        Cookie: `sp_dc=${env.SP_DC}`,
+        "User-Agent": SPOTIFY_UA,
+        "App-Platform": "WebPlayer",
+        Accept: "application/json",
+      },
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    // isAnonymous:true means the cookie was rejected (expired/invalid, or
+    // Spotify now demands a TOTP for this account).
+    if (!json.accessToken || json.isAnonymous) return null;
+    cachedToken = {
+      accessToken: json.accessToken,
+      expiresAt: json.accessTokenExpirationTimestampMs ?? Date.now() + 3_300_000,
+    };
+    return cachedToken.accessToken;
+  } catch {
+    return null;
+  }
+}
+
 export default {
-  async fetch(request) {
+  async fetch(request, env) {
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders(request) });
     }
@@ -50,7 +94,13 @@ export default {
       "SpicyLyrics-Version",
       request.headers.get("SpicyLyrics-Version") || "6.2.3"
     );
-    const auth = request.headers.get("SpicyLyrics-WebAuth");
+
+    // Prefer a web-player token minted from SP_DC (unlocks synced lyrics);
+    // otherwise fall through to whatever token the page sent (text only).
+    const webPlayerToken = await getWebPlayerToken(env);
+    const auth = webPlayerToken
+      ? `Bearer ${webPlayerToken}`
+      : request.headers.get("SpicyLyrics-WebAuth");
     if (auth) headers.set("SpicyLyrics-WebAuth", auth);
 
     const body =
@@ -58,11 +108,7 @@ export default {
         ? undefined
         : await request.arrayBuffer();
 
-    const upstream = await fetch(target, {
-      method: request.method,
-      headers,
-      body,
-    });
+    const upstream = await fetch(target, { method: request.method, headers, body });
 
     const respHeaders = new Headers(upstream.headers);
     for (const [k, v] of Object.entries(corsHeaders(request))) {
