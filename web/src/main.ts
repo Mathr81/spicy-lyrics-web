@@ -17,24 +17,20 @@ import "@src/css/font-pack/font-pack.css";
 import "./styles.css";
 
 import { CLIENT_ID } from "./config.ts";
-import { handleRedirectCallback, isLoggedIn, login, logout } from "./spotify/auth.ts";
+import { handleRedirectCallback, isLoggedIn, login } from "./spotify/auth.ts";
 import {
   initPlayer,
   onUpdate,
-  togglePlay,
-  skipNext,
-  skipPrev,
-  play,
-  getMode,
-  didSdkFail,
+  enableSdkPlayback,
   getSnapshot,
   type AdapterSnapshot,
 } from "./spotify/player.ts";
 import { SpotifyPlayer } from "./shim/SpotifyPlayer.ts";
-import { searchTracks, type SimpleTrack } from "./spotify/api.ts";
+import { type SimpleTrack } from "./spotify/api.ts";
 import { fetchLyrics } from "./lyrics/fetch.ts";
 import { applyLyrics, clearLyrics } from "./lyrics/apply.ts";
 import { buildPage, updateNowBar, showLoader, showNotice } from "./renderer.ts";
+import { setupMediaBoxControls, type MediaBoxHandle } from "./mediabox.ts";
 import { renderShell, type ShellHandle } from "./ui.ts";
 import { $romanization } from "@src/utils/uiState.ts";
 import LoadFonts, { ApplyFontPixel } from "@src/components/Styling/Fonts.ts";
@@ -49,56 +45,48 @@ const NOTICES: Record<string, string> = {
 
 let currentTrackUri: string | null = null;
 let lastLyricsData: any = null;
+let hadTrack = true;
 let shell: ShellHandle;
+let media: MediaBoxHandle;
 const lastLyricsInfo = { type: "—", source: "—", lines: 0, translit: false };
 
 async function main(): Promise<void> {
   const root = document.getElementById("SpicyLyricsRoot") as HTMLElement;
-  buildPage(root);
+  const page = buildPage(root);
 
   // Load the Spicy Lyrics webfont (same source as the extension).
   LoadFonts();
   ApplyFontPixel();
 
-  shell = renderShell(root, {
-    onLogin: () => void login(),
-    onLogout: () => {
-      logout();
-      window.location.reload();
-    },
-    onSearch: (q) => searchTracks(q),
-    onPick: async (track) => {
-      try {
-        await play(track.uri);
-      } catch (err) {
-        console.warn("[SpicyLyrics] play failed", err);
-        if (getMode() === "connect") {
-          shell.setStatus(
-            "Impossible de lancer la lecture ici : ouvre Spotify sur un appareil, " +
-              "lance ce titre, et la page se synchronisera automatiquement."
-          );
-        }
-      }
-      // Load lyrics immediately; playback state will catch up.
-      currentTrackUri = track.uri;
-      updateNowBar(track);
-      void loadLyrics(track);
-    },
-    onToggle: () => void togglePlay(),
-    onNext: () => void skipNext(),
-    onPrev: () => void skipPrev(),
+  shell = renderShell(root, { onLogin: () => void login() });
+
+  // All controls live on the cover, like the extension.
+  media = setupMediaBoxControls(page, {
+    onToggleFullscreen: () => Fullscreen.Toggle(),
     onToggleRomanization: () => {
       const next = !$romanization.get();
       $romanization.set(next);
       if (lastLyricsData) applyLyrics(lastLyricsData, next);
     },
-    onToggleFullscreen: () => Fullscreen.Toggle(),
+    onEnableSdk: async () => {
+      shell.setStatus("Activation de la lecture dans cet onglet…");
+      const ok = await enableSdkPlayback();
+      media.setSdkActive(ok);
+      shell.setStatus(
+        ok
+          ? "Lecture dans cet onglet activée."
+          : "Impossible d'activer la lecture ici (bloqueur Spotify ?)."
+      );
+    },
   });
+
+  document.addEventListener("fullscreenchange", () =>
+    media.setFullscreenActive(!!document.fullscreenElement)
+  );
 
   // Offline preview: ?demo drives the engine with a built-in sample.
   if (new URLSearchParams(window.location.search).has("demo")) {
     const { startDemo } = await import("./demo.ts");
-    shell.setStatus("Mode démo — connectez-vous pour vos vraies paroles Spotify.");
     startDemo();
     return;
   }
@@ -111,7 +99,7 @@ async function main(): Promise<void> {
   }
 
   if (CLIENT_ID === "PUT_YOUR_SPOTIFY_CLIENT_ID_HERE") {
-    shell.setStatus("⚠ Configurez votre Client ID Spotify dans web/src/config.ts");
+    shell.setStatus("⚠ Configurez votre Client ID Spotify (config.ts).");
   }
 
   if (!isLoggedIn()) {
@@ -120,23 +108,24 @@ async function main(): Promise<void> {
   }
 
   shell.setLoggedIn(true);
-  const mode = await initPlayer(true);
-  shell.setMode(mode, null);
 
-  if (mode === "connect" && didSdkFail()) {
-    shell.setStatus(
-      "Lecture dans l'onglet indisponible (bloqueur de pub ? Spotify SDK bloqué). " +
-        "Lance la lecture sur un appareil Spotify — la page suivra en miroir."
-    );
-  }
-
+  // Mirror the active Spotify device by default. Playback in this tab (SDK) is
+  // opt-in via the cover's "listen here" control — never grabbed on load.
+  await initPlayer(false);
   onUpdate(handleSnapshot);
 }
 
 function handleSnapshot(snap: AdapterSnapshot): void {
-  shell.setPlaying(snap.isPlaying);
-  shell.setMode(snap.mode, snap.deviceName);
   updateNowBar(snap.track);
+
+  const hasTrack = !!snap.track;
+  if (hasTrack !== hadTrack) {
+    hadTrack = hasTrack;
+    if (!hasTrack) {
+      currentTrackUri = null;
+      showNotice("Lance un morceau sur Spotify pour voir les paroles.");
+    }
+  }
 
   if (snap.track && snap.track.uri !== currentTrackUri) {
     currentTrackUri = snap.track.uri;
@@ -153,7 +142,7 @@ async function loadLyrics(track: SimpleTrack): Promise<void> {
 
   if (!res.ok) {
     lastLyricsData = null;
-    shell.setRomanizationAvailable(false);
+    media.setRomanizationAvailable(false);
     showNotice(NOTICES[res.reason] ?? NOTICES.error);
     return;
   }
@@ -167,7 +156,7 @@ async function loadLyrics(track: SimpleTrack): Promise<void> {
       ? res.data.Lines.length
       : 0;
   lastLyricsInfo.translit = res.data.HasTransliterations === true;
-  shell.setRomanizationAvailable(res.data.HasTransliterations === true);
+  media.setRomanizationAvailable(res.data.HasTransliterations === true);
   applyLyrics(res.data, romanize);
 }
 

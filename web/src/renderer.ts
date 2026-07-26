@@ -15,8 +15,14 @@ import {
 import { ScrollSimplebar } from "@src/utils/Scrolling/Simplebar/ScrollSimplebar.ts";
 import { triggerRemeasureLV } from "@src/utils/Lyrics/LyricsVirtualizer.ts";
 import ApplyDynamicBackground from "./shim/dynamicBackground.ts";
-import { setupMediaBoxControls } from "./mediabox.ts";
 import type { SimpleTrack } from "./spotify/api.ts";
+
+// iOS/iPadOS Safari throttles `scroll-behavior: smooth`, which makes the
+// active-line auto-scroll crawl and the lyrics drift. Detect it so the CSS can
+// switch that container to instant scrolling.
+const IS_IOS =
+  /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+  (navigator.platform === "MacIntel" && (navigator as any).maxTouchPoints > 1);
 
 const PAGE_HTML = `
   <div class="ContentBox">
@@ -54,14 +60,13 @@ export function buildPage(root: HTMLElement): HTMLElement {
   el.id = "SpicyLyricsPage";
   // The standalone page is the extension's fullscreen lyrics composition.
   el.classList.add("SpicyRenderer", "UseSpicyFont", "Fullscreen");
+  if (IS_IOS) el.classList.add("iOS");
   el.innerHTML = PAGE_HTML;
   root.appendChild(el);
 
   page = el;
   setPageContainer(el);
   $lyricsContainerExists.set(true);
-
-  setupMediaBoxControls(el);
 
   // Continuous auto-scroll to the active line (app.tsx runs this globally).
   new IntervalManager(ScrollingIntervalTime, () => {

@@ -4,6 +4,7 @@
 // feels identical, wired to the standalone Spotify adapter.
 import { Icons } from "@src/components/Styling/Icons.ts";
 import { Spring } from "@src/modules/Spring.ts";
+import { SDK_SUPPORTED } from "./config.ts";
 import { SpotifyPlayer } from "./shim/SpotifyPlayer.ts";
 import {
   togglePlay,
@@ -24,14 +25,42 @@ function fmt(ms: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-export function setupMediaBoxControls(page: HTMLElement): void {
-  const mediaBox = page.querySelector<HTMLElement>(".NowBar .Header .MediaBox");
+// A monitor glyph for the "play in this browser" (SDK opt-in) control.
+const DEVICE_ICON = `<svg class="NoFill" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>`;
+
+export interface MediaBoxCallbacks {
+  onToggleFullscreen: () => void;
+  onToggleRomanization: () => void;
+  onEnableSdk: () => void;
+}
+
+export interface MediaBoxHandle {
+  setRomanizationAvailable: (v: boolean) => void;
+  setFullscreenActive: (v: boolean) => void;
+  setSdkActive: (v: boolean) => void;
+}
+
+export function setupMediaBoxControls(
+  page: HTMLElement,
+  cb: MediaBoxCallbacks
+): MediaBoxHandle {
+  const mediaBox = page.querySelector<HTMLElement>(".NowBar .Header .MediaBox")!;
   const mediaContent = page.querySelector<HTMLElement>(
     ".NowBar .Header .MediaBox .MediaContent"
-  );
-  if (!mediaBox || !mediaContent) return;
+  )!;
+
+  const fullscreenSupported =
+    typeof document.fullscreenEnabled === "boolean"
+      ? document.fullscreenEnabled
+      : "requestFullscreen" in document.documentElement;
+  const sdkSupported = SDK_SUPPORTED;
 
   mediaContent.innerHTML = `
+    <div class="ViewControls">
+      ${sdkSupported ? `<button class="ViewControl ListenHere" title="Écouter dans cet onglet">${DEVICE_ICON}</button>` : ""}
+      <button class="ViewControl RomanizationToggle" title="Romanisation" hidden>${Icons.EnableRomanization}</button>
+      ${fullscreenSupported ? `<button class="ViewControl FullscreenToggle" title="Plein écran">${Icons.Fullscreen}</button>` : ""}
+    </div>
     <div class="PlaybackControls">
       <div class="PlaybackControl ShuffleToggle">${Icons.Shuffle}</div>
       ${Icons.PrevTrack}
@@ -45,6 +74,13 @@ export function setupMediaBoxControls(page: HTMLElement): void {
       <span class="Time Duration">0:00</span>
     </div>
   `;
+
+  const fullBtn = mediaContent.querySelector<HTMLElement>(".FullscreenToggle");
+  const romBtn = mediaContent.querySelector<HTMLElement>(".RomanizationToggle");
+  const listenBtn = mediaContent.querySelector<HTMLElement>(".ListenHere");
+  fullBtn?.addEventListener("click", cb.onToggleFullscreen);
+  romBtn?.addEventListener("click", cb.onToggleRomanization);
+  listenBtn?.addEventListener("click", cb.onEnableSdk);
 
   const playToggle = mediaContent.querySelector<HTMLElement>(".PlayStateToggle")!;
   const prev = mediaContent.querySelector<HTMLElement>(".PrevTrack")!;
@@ -173,4 +209,30 @@ export function setupMediaBoxControls(page: HTMLElement): void {
     lastMove = performance.now();
     kick();
   });
+
+  // Touch devices (iPad/iOS) have no hover — tapping the cover reveals the
+  // controls for a few seconds.
+  let touchTimer: number | undefined;
+  mediaBox.addEventListener("pointerdown", (e) => {
+    if (e.pointerType !== "touch") return;
+    mediaHover = true;
+    kick();
+    window.clearTimeout(touchTimer);
+    touchTimer = window.setTimeout(() => {
+      mediaHover = false;
+      kick();
+    }, 4000);
+  });
+
+  return {
+    setRomanizationAvailable(v) {
+      if (romBtn) romBtn.hidden = !v;
+    },
+    setFullscreenActive(v) {
+      if (fullBtn) fullBtn.innerHTML = v ? Icons.CloseFullscreen : Icons.Fullscreen;
+    },
+    setSdkActive(v) {
+      if (listenBtn) listenBtn.hidden = v;
+    },
+  };
 }
