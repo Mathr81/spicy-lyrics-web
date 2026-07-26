@@ -27,8 +27,10 @@ import {
   play,
   getMode,
   didSdkFail,
+  getSnapshot,
   type AdapterSnapshot,
 } from "./spotify/player.ts";
+import { SpotifyPlayer } from "./shim/SpotifyPlayer.ts";
 import { searchTracks, type SimpleTrack } from "./spotify/api.ts";
 import { fetchLyrics } from "./lyrics/fetch.ts";
 import { applyLyrics, clearLyrics } from "./lyrics/apply.ts";
@@ -48,6 +50,7 @@ const NOTICES: Record<string, string> = {
 let currentTrackUri: string | null = null;
 let lastLyricsData: any = null;
 let shell: ShellHandle;
+const lastLyricsInfo = { type: "—", source: "—", lines: 0, translit: false };
 
 async function main(): Promise<void> {
   const root = document.getElementById("SpicyLyricsRoot") as HTMLElement;
@@ -156,8 +159,40 @@ async function loadLyrics(track: SimpleTrack): Promise<void> {
   }
 
   lastLyricsData = res.data;
+  lastLyricsInfo.type = res.data.Type ?? "—";
+  lastLyricsInfo.source = res.data.source ?? "—";
+  lastLyricsInfo.lines = Array.isArray(res.data.Content)
+    ? res.data.Content.length
+    : Array.isArray(res.data.Lines)
+      ? res.data.Lines.length
+      : 0;
+  lastLyricsInfo.translit = res.data.HasTransliterations === true;
   shell.setRomanizationAvailable(res.data.HasTransliterations === true);
   applyLyrics(res.data, romanize);
 }
 
-void main();
+// ?debug — a small live overlay to tell apart "API returned unsynced text"
+// (Type=Static) from "synced lyrics but the playback clock isn't advancing".
+function startDebug(): void {
+  const box = document.createElement("div");
+  box.style.cssText =
+    "position:fixed;bottom:8px;left:8px;z-index:2000;font:12px/1.5 monospace;" +
+    "background:rgba(0,0,0,.72);color:#0f0;padding:8px 10px;border-radius:8px;" +
+    "pointer-events:none;white-space:pre;max-width:90vw";
+  document.body.appendChild(box);
+  setInterval(() => {
+    const s = getSnapshot();
+    const pos = SpotifyPlayer.GetPosition();
+    const dur = SpotifyPlayer.GetDuration();
+    box.textContent = [
+      `mode:     ${s.mode}${s.deviceName ? " (" + s.deviceName + ")" : ""}`,
+      `playing:  ${s.isPlaying}   pos: ${(pos / 1000).toFixed(1)}s / ${(dur / 1000).toFixed(1)}s`,
+      `track:    ${s.track?.name ?? "—"}`,
+      `lyrics:   type=${lastLyricsInfo.type}  source=${lastLyricsInfo.source}  lines=${lastLyricsInfo.lines}  translit=${lastLyricsInfo.translit}`,
+    ].join("\n");
+  }, 300);
+}
+
+void main().then(() => {
+  if (new URLSearchParams(window.location.search).has("debug")) startDebug();
+});
