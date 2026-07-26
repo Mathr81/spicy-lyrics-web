@@ -151,9 +151,30 @@ account cookie `sp_dc`, server-side:
 `sp_dc` is long-lived (months) — treat it like a password. If lyrics go back to
 text-only, the cookie has expired; repeat the steps.
 
-> Heads-up: this uses Spotify's unofficial `get_access_token` endpoint. Spotify
-> occasionally tightens it (anti-scraping/TOTP); if a valid cookie stops
-> minting a token, the endpoint call in `web/proxy/worker.js` may need updating.
+### How the token is minted (TOTP) — and staying current
+
+Spotify mints the web-player token via `/api/token`, guarded by a **TOTP** (a
+time-based code, RFC 6238, from a per-version "secret cipher" + a version number
+`totpVer`). The Worker implements exactly what the web player / librespot do
+(TOTP verified against the RFC 6238 test vectors, key derived by XORing the
+cipher bytes with `(i % 33) + 9`).
+
+Spotify **rotates the cipher and bumps `totpVer`** to deter scraping, so the
+Worker **auto-updates**: it fetches the community-maintained cipher list
+([`xyloflake/spot-secrets-go`](https://github.com/xyloflake/spot-secrets-go))
+and uses the highest version (falling back to a baked-in copy, then to any older
+version that still works). No code change needed across most rotations.
+
+Verify minting works (never exposes the token):
+
+```
+GET https://<your-worker>.workers.dev/__spicy/tokencheck
+→ { "ok": true, "totpVer": "61" }        # good
+→ { "ok": false, "reason": "..." }        # cookie expired or secret rotated
+```
+
+Manual overrides (rarely needed) via Worker env: `TOTP_SECRET` (a digit-string
+key), `TOTP_VER`, `SECRET_DICT_URL`, or `DISABLE_SECRET_FETCH=1`.
 
 ## How it works (architecture)
 

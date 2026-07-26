@@ -316,6 +316,40 @@ export async function skipPrev(): Promise<void> {
   else await apiPrevious();
 }
 
+/**
+ * Opt-in: take over playback in this browser tab via the Web Playback SDK.
+ * Not done automatically on load — the page mirrors the active device by
+ * default and only becomes its own player when the user asks.
+ */
+export async function enableSdkPlayback(): Promise<boolean> {
+  if (mode === "sdk") return true;
+  if (!SDK_SUPPORTED) return false;
+  try {
+    const ok = await initSdk();
+    if (!ok) {
+      sdkAttemptedAndFailed = true;
+      return false;
+    }
+    mode = "sdk";
+    if (connectTimer) {
+      clearInterval(connectTimer);
+      connectTimer = null;
+    }
+    if (sdkDeviceId) {
+      try {
+        await transferPlayback(sdkDeviceId, true);
+      } catch {
+        /* nothing was playing to move */
+      }
+    }
+    wireControlHooks();
+    return true;
+  } catch {
+    sdkAttemptedAndFailed = true;
+    return false;
+  }
+}
+
 export async function toggleShuffle(): Promise<void> {
   const next = !last.shuffle;
   emit({ ...last, shuffle: next }); // optimistic
