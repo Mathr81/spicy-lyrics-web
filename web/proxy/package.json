@@ -1,0 +1,13 @@
+{
+  "name": "spicy-lyrics-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cloudflare Worker proxy for the Spicy Lyrics API (CORS + header injection).",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "devDependencies": {
+    "wrangler": "^3.90.0"
+  }
+}

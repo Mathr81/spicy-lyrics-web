@@ -99,9 +99,16 @@ the expected headers server-side and adds permissive CORS:
 
 ```bash
 cd web/proxy
-npx wrangler login      # first time only
+npm install             # isolated: uses web/proxy/package.json, not the repo root
+npx wrangler login      # first time only — opens the browser
 npx wrangler deploy     # prints https://spicy-lyrics-proxy.<you>.workers.dev
 ```
+
+> Run these **inside `web/proxy/`** (it has its own `package.json`). Running
+> wrangler from the repo root fails with `npm error EOVERRIDE` because the root
+> `package.json` is a bun project with an `overrides` field npm rejects.
+> No local install at all? Use the Cloudflare dashboard instead: Workers & Pages
+> → Create Worker → paste `web/proxy/worker.js` → Deploy.
 
 Then set `VITE_LYRICS_API` to that Worker URL (as a GitHub Actions Variable, or
 in your local build env) and rebuild. The page will send its requests through the

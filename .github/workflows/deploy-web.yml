@@ -35,6 +35,13 @@ jobs:
         with:
           bun-version: latest
 
+      # Auto-enables GitHub Pages (Source: GitHub Actions) if it isn't already,
+      # so no manual Settings → Pages toggle is required.
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
