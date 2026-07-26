@@ -151,9 +151,27 @@ account cookie `sp_dc`, server-side:
 `sp_dc` is long-lived (months) — treat it like a password. If lyrics go back to
 text-only, the cookie has expired; repeat the steps.
 
-> Heads-up: this uses Spotify's unofficial `get_access_token` endpoint. Spotify
-> occasionally tightens it (anti-scraping/TOTP); if a valid cookie stops
-> minting a token, the endpoint call in `web/proxy/worker.js` may need updating.
+### If synced lyrics stop working (TOTP)
+
+Spotify mints the web-player token via `/api/token` guarded by a **TOTP** (a
+time-based code from a shared secret + a version number `totpVer`). The Worker
+implements this (verified against the RFC 6238 test vectors), but Spotify
+**rotates the secret and bumps `totpVer`** to deter scraping. If a valid `sp_dc`
+suddenly returns text-only again, the secret/version pair is stale — override
+them without touching code:
+
+```bash
+cd web/proxy
+npx wrangler secret put TOTP_SECRET   # current digit-string secret
+# set the matching version as a plain variable:
+#   wrangler.toml  ->  [vars]  TOTP_VER = "61"
+npx wrangler deploy
+```
+
+Current known-good values circulate in community projects (search
+"spotify totp secret"). Defaults in `worker.js`: secret
+`5507145853487499592248630329347`, `totpVer=5` — historically accepted, but may
+need updating to the current pair (e.g. `totpVer=61`).
 
 ## How it works (architecture)
 
