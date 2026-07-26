@@ -1,34 +1,35 @@
 // Browser shim for `src/components/Utils/Fullscreen.ts`.
-// The engine only reads `IsOpen` / `CinemaViewOpen`; the UI shell owns the
-// actual fullscreen toggle via the native Fullscreen API.
-import { PageContainer } from "./PageView.ts";
+//
+// The standalone page IS the fullscreen lyrics view: the `.Fullscreen`
+// composition class is applied permanently by the renderer, and `CinemaViewOpen`
+// is kept true so the reused engine treats it as a fullscreen/cinema layout.
+// The ⛶ button toggles only the *native* browser fullscreen, never the
+// composition class.
 
 const Fullscreen = {
-  IsOpen: false,
-  CinemaViewOpen: false,
+  IsOpen: false, // tracks native browser fullscreen
+  CinemaViewOpen: true, // standalone is always the fullscreen composition
   async Open(): Promise<void> {
-    Fullscreen.IsOpen = true;
-    PageContainer?.classList.add("Fullscreen");
     const el =
-      (document.getElementById("SpicyLyricsRoot") as HTMLElement | null) ?? PageContainer;
+      (document.getElementById("SpicyLyricsRoot") as HTMLElement | null) ??
+      document.documentElement;
     try {
       await el?.requestFullscreen?.();
+      Fullscreen.IsOpen = true;
     } catch {
       /* ignore */
     }
   },
   async Close(): Promise<void> {
-    Fullscreen.IsOpen = false;
-    Fullscreen.CinemaViewOpen = false;
-    PageContainer?.classList.remove("Fullscreen");
     try {
       if (document.fullscreenElement) await document.exitFullscreen();
     } catch {
       /* ignore */
     }
+    Fullscreen.IsOpen = false;
   },
   Toggle(): void {
-    if (Fullscreen.IsOpen) void Fullscreen.Close();
+    if (document.fullscreenElement) void Fullscreen.Close();
     else void Fullscreen.Open();
   },
 };
@@ -48,13 +49,8 @@ export const EnterSpicyLyricsFullscreen = async (): Promise<void> => {
 
 export const CleanupMediaBox = (): void => {};
 
-// Keep state in sync when the user leaves native fullscreen with Esc.
 document.addEventListener("fullscreenchange", () => {
-  if (!document.fullscreenElement && Fullscreen.IsOpen) {
-    Fullscreen.IsOpen = false;
-    Fullscreen.CinemaViewOpen = false;
-    PageContainer?.classList.remove("Fullscreen");
-  }
+  Fullscreen.IsOpen = !!document.fullscreenElement;
 });
 
 export default Fullscreen;

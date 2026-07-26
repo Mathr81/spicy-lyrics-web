@@ -15,6 +15,7 @@ import {
 import { ScrollSimplebar } from "@src/utils/Scrolling/Simplebar/ScrollSimplebar.ts";
 import { triggerRemeasureLV } from "@src/utils/Lyrics/LyricsVirtualizer.ts";
 import ApplyDynamicBackground from "./shim/dynamicBackground.ts";
+import { setupMediaBoxControls } from "./mediabox.ts";
 import type { SimpleTrack } from "./spotify/api.ts";
 
 const PAGE_HTML = `
@@ -51,13 +52,16 @@ let page: HTMLElement | null = null;
 export function buildPage(root: HTMLElement): HTMLElement {
   const el = document.createElement("div");
   el.id = "SpicyLyricsPage";
-  el.classList.add("SpicyRenderer", "UseSpicyFont");
+  // The standalone page is the extension's fullscreen lyrics composition.
+  el.classList.add("SpicyRenderer", "UseSpicyFont", "Fullscreen");
   el.innerHTML = PAGE_HTML;
   root.appendChild(el);
 
   page = el;
   setPageContainer(el);
   $lyricsContainerExists.set(true);
+
+  setupMediaBoxControls(el);
 
   // Continuous auto-scroll to the active line (app.tsx runs this globally).
   new IntervalManager(ScrollingIntervalTime, () => {
