@@ -151,27 +151,30 @@ account cookie `sp_dc`, server-side:
 `sp_dc` is long-lived (months) — treat it like a password. If lyrics go back to
 text-only, the cookie has expired; repeat the steps.
 
-### If synced lyrics stop working (TOTP)
+### How the token is minted (TOTP) — and staying current
 
-Spotify mints the web-player token via `/api/token` guarded by a **TOTP** (a
-time-based code from a shared secret + a version number `totpVer`). The Worker
-implements this (verified against the RFC 6238 test vectors), but Spotify
-**rotates the secret and bumps `totpVer`** to deter scraping. If a valid `sp_dc`
-suddenly returns text-only again, the secret/version pair is stale — override
-them without touching code:
+Spotify mints the web-player token via `/api/token`, guarded by a **TOTP** (a
+time-based code, RFC 6238, from a per-version "secret cipher" + a version number
+`totpVer`). The Worker implements exactly what the web player / librespot do
+(TOTP verified against the RFC 6238 test vectors, key derived by XORing the
+cipher bytes with `(i % 33) + 9`).
 
-```bash
-cd web/proxy
-npx wrangler secret put TOTP_SECRET   # current digit-string secret
-# set the matching version as a plain variable:
-#   wrangler.toml  ->  [vars]  TOTP_VER = "61"
-npx wrangler deploy
+Spotify **rotates the cipher and bumps `totpVer`** to deter scraping, so the
+Worker **auto-updates**: it fetches the community-maintained cipher list
+([`xyloflake/spot-secrets-go`](https://github.com/xyloflake/spot-secrets-go))
+and uses the highest version (falling back to a baked-in copy, then to any older
+version that still works). No code change needed across most rotations.
+
+Verify minting works (never exposes the token):
+
+```
+GET https://<your-worker>.workers.dev/__spicy/tokencheck
+→ { "ok": true, "totpVer": "61" }        # good
+→ { "ok": false, "reason": "..." }        # cookie expired or secret rotated
 ```
 
-Current known-good values circulate in community projects (search
-"spotify totp secret"). Defaults in `worker.js`: secret
-`5507145853487499592248630329347`, `totpVer=5` — historically accepted, but may
-need updating to the current pair (e.g. `totpVer=61`).
+Manual overrides (rarely needed) via Worker env: `TOTP_SECRET` (a digit-string
+key), `TOTP_VER`, `SECRET_DICT_URL`, or `DISABLE_SECRET_FETCH=1`.
 
 ## How it works (architecture)
 
