@@ -52,18 +52,23 @@ body {
   transform: scale(1.2);
 }
 
-/* iOS/iPadOS Safari throttles smooth scrolling, making the active-line scroll
-   crawl. Switch the lyrics scroll container to instant scrolling there. */
+/* iOS/iPadOS Safari throttles smooth scrolling AND defers programmatic scrolls
+   inside momentum (`-webkit-overflow-scrolling: touch`) containers, which makes
+   the active-line scroll lag then jump. Force instant, non-momentum scrolling
+   on the lyrics scroll container there. */
 #SpicyLyricsPage.iOS .simplebar-content-wrapper,
 #SpicyLyricsPage.iOS .LyricsContainer .LyricsContent {
   scroll-behavior: auto !important;
+  -webkit-overflow-scrolling: auto !important;
 }
 
-/* The extension's CSS uses the unprefixed `background-clip: text` only. Several
-   engines still need the `-webkit-` prefix to clip the gradient to the glyphs;
-   without it the transparent-filled text falls back to showing its text-shadow
-   as a second, offset copy (the "doubled letters" seen on some browsers, e.g.
-   the interlude dots). Add the prefix + smoothing across the lyric glyphs. */
+/* --- Letter "doubling" on Blink (Chrome/Vivaldi/Android), not WebKit --------
+   The lyric glyphs use `background-clip: text` + a transparent fill and are
+   promoted to their own GPU layer by the animator (`will-change`,
+   `backface-visibility: hidden`). On Blink under real GPU rasterization this
+   double-paints the text — a static ghost behind the animated glyph. De-promote
+   the clipped-text elements (they still animate fine on the main thread) and add
+   the `-webkit-` clip prefix + smoothing. */
 #SpicyLyricsPage.SpicyRenderer .LyricsContainer .LyricsContent .line,
 #SpicyLyricsPage.SpicyRenderer .LyricsContainer .LyricsContent .line .word,
 #SpicyLyricsPage.SpicyRenderer .LyricsContainer .LyricsContent .line .letter,
@@ -72,6 +77,9 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
+  backface-visibility: visible !important;
+  -webkit-backface-visibility: visible !important;
+  will-change: auto !important;
 }
 
 /* Round ViewControls that are toggled off (e.g. romanization when unavailable)
