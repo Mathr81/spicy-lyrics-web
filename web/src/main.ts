@@ -92,9 +92,14 @@ async function main(): Promise<void> {
   );
 
   // Offline preview: ?demo drives the engine with a built-in sample.
-  if (new URLSearchParams(window.location.search).has("demo")) {
+  const params = new URLSearchParams(window.location.search);
+  if (params.has("demo")) {
     const { startDemo } = await import("./demo.ts");
     startDemo();
+    if (params.has("pippreview")) {
+      const { startPipPreview } = await import("./mobilepip.ts");
+      startPipPreview();
+    }
     return;
   }
 

@@ -97,6 +97,14 @@ body {
   padding-top: max(0px, env(safe-area-inset-top, 0px)) !important;
 }
 
+/* Compact/phone: the wide side paddings (meant for the desktop side-NowBar)
+   waste the right third of the screen. Use near-symmetric, tight paddings so the
+   lyrics fill the width. */
+#SpicyLyricsPage.SpicyRenderer.CompactMode {
+  --LyricsLeftSidePadding: 6cqw !important;
+  --LyricsRightSidePadding: 6cqw !important;
+}
+
 /* --------------------------------------------------------------------- */
 /* Login overlay (shown only when logged out)                            */
 /* --------------------------------------------------------------------- */
