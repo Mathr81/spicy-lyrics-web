@@ -31,7 +31,8 @@ import { fetchLyrics } from "./lyrics/fetch.ts";
 import { applyLyrics, clearLyrics } from "./lyrics/apply.ts";
 import { buildPage, updateNowBar, showLoader, showNotice } from "./renderer.ts";
 import { setupMediaBoxControls, type MediaBoxHandle } from "./mediabox.ts";
-import { togglePip } from "./pip.ts";
+import { togglePip, pipSupported } from "./pip.ts";
+import { toggleVideoPip, setPipLyrics } from "./mobilepip.ts";
 import { renderShell, type ShellHandle } from "./ui.ts";
 import { $romanization } from "@src/utils/uiState.ts";
 import LoadFonts, { ApplyFontPixel } from "@src/components/Styling/Fonts.ts";
@@ -79,7 +80,11 @@ async function main(): Promise<void> {
           : "Impossible d'activer la lecture ici (bloqueur Spotify ?)."
       );
     },
-    onTogglePip: () => void togglePip(),
+    onTogglePip: () => {
+      // Desktop Chromium → Document PiP (full page). Mobile → video PiP overlay.
+      if (pipSupported()) void togglePip();
+      else void toggleVideoPip();
+    },
   });
 
   document.addEventListener("fullscreenchange", () =>
@@ -144,12 +149,14 @@ async function loadLyrics(track: SimpleTrack): Promise<void> {
 
   if (!res.ok) {
     lastLyricsData = null;
+    setPipLyrics(null);
     media.setRomanizationAvailable(false);
     showNotice(NOTICES[res.reason] ?? NOTICES.error);
     return;
   }
 
   lastLyricsData = res.data;
+  setPipLyrics(res.data);
   lastLyricsInfo.type = res.data.Type ?? "—";
   lastLyricsInfo.source = res.data.source ?? "—";
   lastLyricsInfo.lines = Array.isArray(res.data.Content)

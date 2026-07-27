@@ -6,6 +6,7 @@ import { Icons } from "@src/components/Styling/Icons.ts";
 import { Spring } from "@src/modules/Spring.ts";
 import { SDK_SUPPORTED } from "./config.ts";
 import { pipSupported } from "./pip.ts";
+import { videoPipSupported } from "./mobilepip.ts";
 import { SpotifyPlayer } from "./shim/SpotifyPlayer.ts";
 import {
   togglePlay,
@@ -61,7 +62,7 @@ export function setupMediaBoxControls(
     <div class="ViewControls">
       ${sdkSupported ? `<button class="ViewControl ListenHere" title="Écouter dans cet onglet">${DEVICE_ICON}</button>` : ""}
       <button class="ViewControl RomanizationToggle" title="Romanisation" hidden>${Icons.EnableRomanization}</button>
-      ${pipSupported() ? `<button class="ViewControl PipToggle" title="Picture-in-Picture">${Icons.PiPMode}</button>` : ""}
+      ${pipSupported() || videoPipSupported() ? `<button class="ViewControl PipToggle" title="Picture-in-Picture">${Icons.PiPMode}</button>` : ""}
       ${fullscreenSupported ? `<button class="ViewControl FullscreenToggle" title="Plein écran">${Icons.Fullscreen}</button>` : ""}
     </div>
     <div class="PlaybackControls">

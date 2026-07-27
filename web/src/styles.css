@@ -89,6 +89,18 @@ body {
   display: none !important;
 }
 
+/* Narrow panes (iPad Split View / Slide Over, phones): the side artwork gets
+   cramped, so hide the NowBar and give the lyrics the full width. */
+@container (max-width: 620px) {
+  #SpicyLyricsPage .ContentBox .NowBar {
+    display: none !important;
+  }
+  #SpicyLyricsPage .LyricsContainer .LyricsContent {
+    padding-left: 7cqw !important;
+    padding-right: 7cqw !important;
+  }
+}
+
 /* --------------------------------------------------------------------- */
 /* Login overlay (shown only when logged out)                            */
 /* --------------------------------------------------------------------- */
