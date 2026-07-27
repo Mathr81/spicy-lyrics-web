@@ -3,6 +3,7 @@
 // a smoke test for the faithful lyric animation.
 import { pushPlaybackState } from "./shim/SpotifyPlayer.ts";
 import { applyLyrics } from "./lyrics/apply.ts";
+import { setPipLyrics } from "./mobilepip.ts";
 import { updateNowBar } from "./renderer.ts";
 
 const SAMPLE = {
@@ -70,6 +71,7 @@ export function startDemo(): void {
   updateNowBar(track);
   pushPlaybackState({ positionMs: 0, isPlaying: true, track });
   applyLyrics(SAMPLE, false);
+  setPipLyrics(SAMPLE);
 
   // Re-anchor the clock each loop so the sample repeats.
   const start = performance.now();

@@ -5,6 +5,8 @@
 import { Icons } from "@src/components/Styling/Icons.ts";
 import { Spring } from "@src/modules/Spring.ts";
 import { SDK_SUPPORTED } from "./config.ts";
+import { pipSupported } from "./pip.ts";
+import { videoPipSupported } from "./mobilepip.ts";
 import { SpotifyPlayer } from "./shim/SpotifyPlayer.ts";
 import {
   togglePlay,
@@ -32,6 +34,7 @@ export interface MediaBoxCallbacks {
   onToggleFullscreen: () => void;
   onToggleRomanization: () => void;
   onEnableSdk: () => void;
+  onTogglePip: () => void;
 }
 
 export interface MediaBoxHandle {
@@ -59,6 +62,7 @@ export function setupMediaBoxControls(
     <div class="ViewControls">
       ${sdkSupported ? `<button class="ViewControl ListenHere" title="Écouter dans cet onglet">${DEVICE_ICON}</button>` : ""}
       <button class="ViewControl RomanizationToggle" title="Romanisation" hidden>${Icons.EnableRomanization}</button>
+      ${pipSupported() || videoPipSupported() ? `<button class="ViewControl PipToggle" title="Picture-in-Picture">${Icons.PiPMode}</button>` : ""}
       ${fullscreenSupported ? `<button class="ViewControl FullscreenToggle" title="Plein écran">${Icons.Fullscreen}</button>` : ""}
     </div>
     <div class="PlaybackControls">
@@ -78,9 +82,11 @@ export function setupMediaBoxControls(
   const fullBtn = mediaContent.querySelector<HTMLElement>(".FullscreenToggle");
   const romBtn = mediaContent.querySelector<HTMLElement>(".RomanizationToggle");
   const listenBtn = mediaContent.querySelector<HTMLElement>(".ListenHere");
+  const pipBtn = mediaContent.querySelector<HTMLElement>(".PipToggle");
   fullBtn?.addEventListener("click", cb.onToggleFullscreen);
   romBtn?.addEventListener("click", cb.onToggleRomanization);
   listenBtn?.addEventListener("click", cb.onEnableSdk);
+  pipBtn?.addEventListener("click", cb.onTogglePip);
 
   const playToggle = mediaContent.querySelector<HTMLElement>(".PlayStateToggle")!;
   const prev = mediaContent.querySelector<HTMLElement>(".PrevTrack")!;
