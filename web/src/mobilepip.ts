@@ -15,7 +15,7 @@ let lyrics: any = null;
 let canvas: HTMLCanvasElement | null = null;
 let ctx: CanvasRenderingContext2D | null = null;
 let video: HTMLVideoElement | null = null;
-let raf = 0;
+let timer: ReturnType<typeof setInterval> | null = null;
 let active = false;
 let model: Line[] = [];
 
@@ -95,7 +95,10 @@ function activeIndex(pos: number): number {
 }
 
 function draw(): void {
-  raf = requestAnimationFrame(draw);
+  // Driven by setInterval (not rAF): rAF is paused while the tab is in the
+  // background — which is exactly when PiP is useful (user on Spotify) — and a
+  // stalled canvas ends the MediaStream, closing the PiP. setInterval keeps
+  // producing frames (throttled but alive) in the background.
   if (!ctx) return;
   const pos = SpotifyPlayer.GetPosition();
 
@@ -166,7 +169,8 @@ export async function toggleVideoPip(): Promise<boolean> {
     ctx = canvas.getContext("2d");
     if (!ctx) return false;
 
-    draw(); // start producing frames before capture
+    draw(); // paint one frame before capture
+    timer = setInterval(draw, 66); // ~15fps, survives backgrounding
 
     const stream = (canvas as any).captureStream?.(30);
     if (!stream) {
@@ -178,8 +182,10 @@ export async function toggleVideoPip(): Promise<boolean> {
     video.muted = true;
     (video as any).playsInline = true;
     video.srcObject = stream;
+    // Rendered (so the browser considers it PiP-eligible) but hidden behind the
+    // opaque page — NOT display:none / opacity:0, which make PiP bail.
     video.style.cssText =
-      "position:fixed;right:0;bottom:0;width:1px;height:1px;opacity:0;pointer-events:none";
+      "position:fixed;inset:0;width:100%;height:100%;object-fit:cover;z-index:-1;pointer-events:none";
     document.body.appendChild(video);
 
     await video.play();
@@ -208,8 +214,8 @@ export async function toggleVideoPip(): Promise<boolean> {
 
 function stop(): void {
   active = false;
-  if (raf) cancelAnimationFrame(raf);
-  raf = 0;
+  if (timer) clearInterval(timer);
+  timer = null;
   if (video) {
     try {
       if ((document as any).pictureInPictureElement === video) {

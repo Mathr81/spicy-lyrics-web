@@ -15,6 +15,7 @@ import {
 import { ScrollSimplebar } from "@src/utils/Scrolling/Simplebar/ScrollSimplebar.ts";
 import { triggerRemeasureLV } from "@src/utils/Lyrics/LyricsVirtualizer.ts";
 import ApplyDynamicBackground from "./shim/dynamicBackground.ts";
+import { EnableCompactMode, DisableCompactMode } from "./shim/CompactMode.ts";
 import type { SimpleTrack } from "./spotify/api.ts";
 
 // iOS/iPadOS Safari throttles `scroll-behavior: smooth`, which makes the
@@ -67,6 +68,17 @@ export function buildPage(root: HTMLElement): HTMLElement {
   page = el;
   setPageContainer(el);
   $lyricsContainerExists.set(true);
+
+  // Phone / narrow panes (portrait phones, iPad Split View): use the extension's
+  // real compact layout — small cover + metadata stacked above full-width lyrics,
+  // controls preserved — instead of the wide side-by-side composition.
+  const compactMq = window.matchMedia("(max-width: 680px)");
+  const applyCompact = () => {
+    if (compactMq.matches) EnableCompactMode();
+    else DisableCompactMode();
+  };
+  applyCompact();
+  compactMq.addEventListener("change", applyCompact);
 
   // Continuous auto-scroll to the active line (app.tsx runs this globally).
   new IntervalManager(ScrollingIntervalTime, () => {
