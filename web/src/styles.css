@@ -89,16 +89,12 @@ body {
   display: none !important;
 }
 
-/* Narrow panes (iPad Split View / Slide Over, phones): the side artwork gets
-   cramped, so hide the NowBar and give the lyrics the full width. */
-@container (max-width: 620px) {
-  #SpicyLyricsPage .ContentBox .NowBar {
-    display: none !important;
-  }
-  #SpicyLyricsPage .LyricsContainer .LyricsContent {
-    padding-left: 7cqw !important;
-    padding-right: 7cqw !important;
-  }
+/* Phone / narrow panes use the extension's real compact layout (see renderer:
+   CompactMode is toggled on for small viewports), which stacks a small cover +
+   metadata above the lyrics and keeps the cover controls. Nothing extra needed
+   here beyond making sure the safe-area top inset is respected. */
+#SpicyLyricsPage.CompactMode .ContentBox .NowBar {
+  padding-top: max(0px, env(safe-area-inset-top, 0px)) !important;
 }
 
 /* --------------------------------------------------------------------- */
