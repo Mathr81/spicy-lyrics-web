@@ -13,8 +13,47 @@ export type LyricsResult =
 
 const cache = new Map<string, any>();
 
+// Persist fetched lyrics across sessions so revisiting a track never re-hits the
+// API — the API rate-limits repeated queries, so cutting request volume directly
+// helps. Lyrics are effectively immutable per track, so no TTL is needed.
+const STORE_PREFIX = "sl_lyrics_v1_";
+
+function readPersisted(trackId: string): any | null {
+  try {
+    const raw = localStorage.getItem(STORE_PREFIX + trackId);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writePersisted(trackId: string, data: any): void {
+  try {
+    localStorage.setItem(STORE_PREFIX + trackId, JSON.stringify(data));
+  } catch {
+    // Quota exceeded or storage unavailable — the in-memory cache still serves
+    // this session; drop the oldest persisted entries to make room next time.
+    try {
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith(STORE_PREFIX)) {
+          localStorage.removeItem(key);
+          break;
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 export async function fetchLyrics(trackId: string): Promise<LyricsResult> {
   if (cache.has(trackId)) return { ok: true, data: cache.get(trackId) };
+  const persisted = readPersisted(trackId);
+  if (persisted) {
+    cache.set(trackId, persisted);
+    return { ok: true, data: persisted };
+  }
 
   const token = await getAccessToken();
   if (!token) return { ok: false, reason: "no-auth", status: 401 };
@@ -72,5 +111,6 @@ export async function fetchLyrics(trackId: string): Promise<LyricsResult> {
 
   data.uri = `spotify:track:${trackId}`;
   cache.set(trackId, data);
+  writePersisted(trackId, data);
   return { ok: true, data };
 }

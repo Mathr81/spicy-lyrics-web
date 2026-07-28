@@ -19,6 +19,29 @@ import {
 let pipWin: any = null;
 let placeholder: Comment | null = null;
 let wasCompact = false;
+let tabNotice: HTMLElement | null = null;
+
+// While the live page lives in the PiP window, the main tab is empty — show a
+// notice there so it's clear the lyrics are playing in Picture-in-Picture.
+function showTabNotice(): void {
+  if (tabNotice) return;
+  const host = document.getElementById("SpicyLyricsRoot");
+  if (!host) return;
+  tabNotice = document.createElement("div");
+  tabNotice.className = "sl-pip-notice";
+  tabNotice.innerHTML = `
+    <div class="sl-pip-notice-inner">
+      <div class="sl-pip-notice-icon">🎵</div>
+      <div class="sl-pip-notice-title">Lecture en Picture-in-Picture</div>
+      <div class="sl-pip-notice-sub">Les paroles s'affichent dans la fenêtre PiP. Fermez-la pour les ramener ici.</div>
+    </div>`;
+  host.appendChild(tabNotice);
+}
+
+function hideTabNotice(): void {
+  tabNotice?.remove();
+  tabNotice = null;
+}
 
 export function pipSupported(): boolean {
   return "documentPictureInPicture" in window;
@@ -78,12 +101,14 @@ export async function togglePip(): Promise<boolean> {
   wrapper.appendChild(page); // adoptNode happens implicitly
   pipWin.document.body.appendChild(wrapper);
 
+  showTabNotice();
   pipWin.addEventListener("pagehide", restore, { once: true });
   return true;
 }
 
 function restore(): void {
   if (!pipWin) return;
+  hideTabNotice();
   const page = pipWin.document.getElementById("SpicyLyricsPage");
   if (page) {
     // Undo the PiP compact composition, honouring the pre-PiP state.

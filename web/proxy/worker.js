@@ -50,10 +50,25 @@ function corsHeaders(request) {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
     "Access-Control-Allow-Headers":
-      "Content-Type, SpicyLyrics-Version, SpicyLyrics-WebAuth, X-mode, Accept",
+      "Content-Type, SpicyLyrics-Version, SpicyLyrics-WebAuth, X-mode, Accept, Authorization",
     "Access-Control-Max-Age": "86400",
     Vary: "Origin",
   };
+}
+
+// True if the request body contains a session-lifecycle operation that the API
+// authorizes via the `Authorization` header (session creation / refresh).
+function needsSessionAuth(bodyBuffer) {
+  try {
+    const text = new TextDecoder().decode(bodyBuffer);
+    const parsed = JSON.parse(text);
+    const queries = Array.isArray(parsed?.queries) ? parsed.queries : [];
+    return queries.some(
+      (q) => q?.operation === "createSession" || q?.operation === "refreshSession"
+    );
+  } catch {
+    return false;
+  }
 }
 
 function openSpotifyHeaders(env) {
@@ -240,6 +255,18 @@ export default {
       request.method === "GET" || request.method === "HEAD"
         ? undefined
         : await request.arrayBuffer();
+
+    // The Spicy Lyrics API (v6.2.3+) uses a session model: clients call
+    // `createSession` (→ session token) and keep it alive with `ping`/
+    // `refreshSession`/`pingConfig`. Non-session `/query` traffic gets rate
+    // limited. The session-creating ops read the `Authorization` header (a
+    // Spotify token) — which a browser can't set and this worker otherwise
+    // drops. Inject the same web-player token used for lyrics so the session
+    // and the lyric queries share one identity. Only for the session ops, to
+    // avoid touching lyric-query behaviour.
+    if (webPlayerToken && body && needsSessionAuth(body)) {
+      headers.set("Authorization", `Bearer ${webPlayerToken}`);
+    }
 
     const upstream = await fetch(target, { method: request.method, headers, body });
 
