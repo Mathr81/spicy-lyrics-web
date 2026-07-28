@@ -55,7 +55,14 @@ body {
 /* iOS/iPadOS Safari throttles smooth scrolling AND defers programmatic scrolls
    inside momentum (`-webkit-overflow-scrolling: touch`) containers, which makes
    the active-line scroll lag then jump. Force instant, non-momentum scrolling
-   on the lyrics scroll container there. */
+   on the lyrics scroll container there.
+
+   The engine's Simplebar.css locks `scroll-behavior: smooth !important` with a
+   3-class selector (`#SpicyLyricsPage [data-simplebar]:not(.simplebar-dragging)
+   .simplebar-content-wrapper`); a plain `.iOS .simplebar-content-wrapper`
+   override loses the specificity battle, so we mirror that selector shape (plus
+   `.iOS`) to actually win. */
+#SpicyLyricsPage.iOS [data-simplebar]:not(.simplebar-dragging) .simplebar-content-wrapper,
 #SpicyLyricsPage.iOS .simplebar-content-wrapper,
 #SpicyLyricsPage.iOS .LyricsContainer .LyricsContent {
   scroll-behavior: auto !important;
@@ -63,23 +70,22 @@ body {
 }
 
 /* --- Letter "doubling" on Blink (Chrome/Vivaldi/Android), not WebKit --------
-   The lyric glyphs use `background-clip: text` + a transparent fill and are
-   promoted to their own GPU layer by the animator (`will-change`,
-   `backface-visibility: hidden`). On Blink under real GPU rasterization this
-   double-paints the text — a static ghost behind the animated glyph. De-promote
-   the clipped-text elements (they still animate fine on the main thread) and add
-   the `-webkit-` clip prefix + smoothing. */
-#SpicyLyricsPage.SpicyRenderer .LyricsContainer .LyricsContent .line,
-#SpicyLyricsPage.SpicyRenderer .LyricsContainer .LyricsContent .line .word,
-#SpicyLyricsPage.SpicyRenderer .LyricsContainer .LyricsContent .line .letter,
-#SpicyLyricsPage.SpicyRenderer .LyricsContainer .LyricsContent .line .dot {
-  -webkit-background-clip: text !important;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  text-rendering: optimizeLegibility;
-  backface-visibility: visible !important;
-  -webkit-backface-visibility: visible !important;
-  will-change: auto !important;
+   `background-clip: text` clips an element's gradient to the union of *all*
+   descendant glyphs. In Syllable mode the container elements — the syllable
+   `.line` (its text lives in child `.word`/`.letterGroup`/`.dot`), the
+   `.letterGroup` (its text lives in child `.letter`s), and the musical `.line`
+   (dots live in a `.dotGroup`) — each paint that clipped copy at the CONTAINER's
+   transform, while every child word/letter/dot ALSO paints itself at its own
+   independently-animated transform. On Blink's GPU compositor these land in
+   separate layers at different positions → a static ghost sits behind the moving
+   glyphs (the "doublure"). WebKit composites them together, so it's unaffected.
+
+   Fix: only leaf text should paint. Blank the container's own gradient fill.
+   Line-mode and Static lines hold their text DIRECTLY (no `.word` child) and are
+   animated as a whole, so they keep their gradient and are left untouched. */
+#SpicyLyricsPage.SpicyRenderer .LyricsContainer .LyricsContent .line .letterGroup,
+#SpicyLyricsPage.SpicyRenderer .LyricsContainer .LyricsContent .line:has(.word) {
+  background-image: none !important;
 }
 
 /* Round ViewControls that are toggled off (e.g. romanization when unavailable)
@@ -103,6 +109,37 @@ body {
 #SpicyLyricsPage.SpicyRenderer.CompactMode {
   --LyricsLeftSidePadding: 6cqw !important;
   --LyricsRightSidePadding: 6cqw !important;
+}
+
+/* iOS Safari intermittently collapses the bottom PlaybackControls row (shuffle /
+   prev / play / next / loop) so only the top ViewControls and the timeline show
+   on the cover. The row and its buttons size themselves through a container-query
+   chain that nests a `container-type: size` element (`.PlaybackControls`) inside
+   another (`.MediaBox`); iOS resolves that unreliably and can zero the buttons'
+   height. Pin concrete heights straight off `.MediaBox` (which resolves fine) and
+   drop the intermediate size-container so the controls always render. The widths
+   were already ~equal to their MediaBox-relative values, since PlaybackControls
+   spans the full cover width. */
+#SpicyLyricsPage.iOS.Fullscreen
+  .ContentBox
+  .NowBar
+  .Header
+  .MediaBox
+  .MediaContent
+  .PlaybackControls {
+  container-type: normal !important;
+  height: 13cqh !important;
+}
+
+#SpicyLyricsPage.iOS.Fullscreen
+  .ContentBox
+  .NowBar
+  .Header
+  .MediaBox
+  .MediaContent
+  .PlaybackControls
+  .PlaybackControl {
+  height: 13cqh !important;
 }
 
 /* --------------------------------------------------------------------- */

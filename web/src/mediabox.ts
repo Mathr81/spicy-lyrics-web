@@ -35,12 +35,15 @@ export interface MediaBoxCallbacks {
   onToggleRomanization: () => void;
   onEnableSdk: () => void;
   onTogglePip: () => void;
+  onSwapSides: () => void;
+  onToggleCompact: () => boolean;
 }
 
 export interface MediaBoxHandle {
   setRomanizationAvailable: (v: boolean) => void;
   setFullscreenActive: (v: boolean) => void;
   setSdkActive: (v: boolean) => void;
+  setCompactActive: (v: boolean) => void;
 }
 
 export function setupMediaBoxControls(
@@ -60,8 +63,10 @@ export function setupMediaBoxControls(
 
   mediaContent.innerHTML = `
     <div class="ViewControls">
-      ${sdkSupported ? `<button class="ViewControl ListenHere" title="Écouter dans cet onglet">${DEVICE_ICON}</button>` : ""}
+      <button class="ViewControl CompactModeToggle" title="Mode compact">${Icons.EnableCompactModeIcon}</button>
+      <button class="ViewControl NowBarSideToggle" title="Inverser la cover et les paroles">${Icons.NowBarSideSwap}</button>
       <button class="ViewControl RomanizationToggle" title="Romanisation" hidden>${Icons.EnableRomanization}</button>
+      ${sdkSupported ? `<button class="ViewControl ListenHere" title="Écouter dans cet onglet">${DEVICE_ICON}</button>` : ""}
       ${pipSupported() || videoPipSupported() ? `<button class="ViewControl PipToggle" title="Picture-in-Picture">${Icons.PiPMode}</button>` : ""}
       ${fullscreenSupported ? `<button class="ViewControl FullscreenToggle" title="Plein écran">${Icons.Fullscreen}</button>` : ""}
     </div>
@@ -83,10 +88,20 @@ export function setupMediaBoxControls(
   const romBtn = mediaContent.querySelector<HTMLElement>(".RomanizationToggle");
   const listenBtn = mediaContent.querySelector<HTMLElement>(".ListenHere");
   const pipBtn = mediaContent.querySelector<HTMLElement>(".PipToggle");
+  const swapBtn = mediaContent.querySelector<HTMLElement>(".NowBarSideToggle");
+  const compactBtn = mediaContent.querySelector<HTMLElement>(".CompactModeToggle");
   fullBtn?.addEventListener("click", cb.onToggleFullscreen);
   romBtn?.addEventListener("click", cb.onToggleRomanization);
   listenBtn?.addEventListener("click", cb.onEnableSdk);
   pipBtn?.addEventListener("click", cb.onTogglePip);
+  swapBtn?.addEventListener("click", cb.onSwapSides);
+  const setCompactIcon = (active: boolean) => {
+    if (compactBtn)
+      compactBtn.innerHTML = active
+        ? Icons.DisableCompactModeIcon
+        : Icons.EnableCompactModeIcon;
+  };
+  compactBtn?.addEventListener("click", () => setCompactIcon(cb.onToggleCompact()));
 
   const playToggle = mediaContent.querySelector<HTMLElement>(".PlayStateToggle")!;
   const prev = mediaContent.querySelector<HTMLElement>(".PrevTrack")!;
@@ -239,6 +254,9 @@ export function setupMediaBoxControls(
     },
     setSdkActive(v) {
       if (listenBtn) listenBtn.hidden = v;
+    },
+    setCompactActive(v) {
+      setCompactIcon(v);
     },
   };
 }

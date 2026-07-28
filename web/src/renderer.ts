@@ -11,6 +11,8 @@ import {
   InitializeScrollEvents,
   CleanupScrollEvents,
   ScrollToActiveLine,
+  QueueForceScroll,
+  ResetLastLine,
 } from "@src/utils/Scrolling/ScrollToActiveLine.ts";
 import { ScrollSimplebar } from "@src/utils/Scrolling/Simplebar/ScrollSimplebar.ts";
 import { triggerRemeasureLV } from "@src/utils/Lyrics/LyricsVirtualizer.ts";
@@ -55,12 +57,17 @@ const PAGE_HTML = `
 `;
 
 let page: HTMLElement | null = null;
+// null = follow the automatic narrow-viewport heuristic; true/false = the user
+// forced compact mode on/off from the cover control.
+let manualCompact: boolean | null = null;
 
 export function buildPage(root: HTMLElement): HTMLElement {
   const el = document.createElement("div");
   el.id = "SpicyLyricsPage";
   // The standalone page is the extension's fullscreen lyrics composition.
   el.classList.add("SpicyRenderer", "UseSpicyFont", "Fullscreen");
+  // The NowBar starts on the left; the side-swap control flips this pair.
+  el.classList.add("NowBarSide__Left");
   if (IS_IOS) el.classList.add("iOS");
   el.innerHTML = PAGE_HTML;
   root.appendChild(el);
@@ -74,6 +81,9 @@ export function buildPage(root: HTMLElement): HTMLElement {
   // controls preserved — instead of the wide side-by-side composition.
   const compactMq = window.matchMedia("(max-width: 680px)");
   const applyCompact = () => {
+    // A manual toggle (the cover's compact-mode control) wins over the automatic
+    // narrow-viewport heuristic until the user clears it.
+    if (manualCompact !== null) return;
     if (compactMq.matches) EnableCompactMode();
     else DisableCompactMode();
   };
@@ -102,6 +112,43 @@ export function buildPage(root: HTMLElement): HTMLElement {
 
 export function getContentBox(): HTMLElement | null {
   return page?.querySelector<HTMLElement>(".ContentBox") ?? null;
+}
+
+// Flip the cover ↔ lyrics sides, mirroring the extension's NowBar side-swap
+// (ViewControls → NowBarSideToggle). Toggles the same classes the engine CSS
+// keys off, then re-centres the active line.
+export function swapNowBarSide(): void {
+  const nowBar = page?.querySelector<HTMLElement>(".ContentBox .NowBar");
+  if (!page || !nowBar) return;
+  const toRight = nowBar.classList.contains("LeftSide");
+  nowBar.classList.toggle("LeftSide", !toRight);
+  nowBar.classList.toggle("RightSide", toRight);
+  page.classList.toggle("NowBarSide__Left", !toRight);
+  page.classList.toggle("NowBarSide__Right", toRight);
+  ResetLastLine();
+  QueueForceScroll();
+}
+
+// Toggle the extension's compact layout (small cover + metadata stacked above
+// full-width lyrics) from the cover control. Returns the new state.
+export function toggleCompactMode(): boolean {
+  if (!page) return false;
+  const enabled = !page.classList.contains("CompactMode");
+  manualCompact = enabled;
+  if (enabled) {
+    page.classList.add("ForcedCompactMode");
+    EnableCompactMode();
+  } else {
+    page.classList.remove("ForcedCompactMode");
+    DisableCompactMode();
+  }
+  ResetLastLine();
+  QueueForceScroll();
+  return enabled;
+}
+
+export function isCompactModeActive(): boolean {
+  return !!page?.classList.contains("CompactMode");
 }
 
 let lastCover: string | null = null;

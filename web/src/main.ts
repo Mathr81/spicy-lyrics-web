@@ -29,7 +29,15 @@ import { SpotifyPlayer } from "./shim/SpotifyPlayer.ts";
 import { type SimpleTrack } from "./spotify/api.ts";
 import { fetchLyrics } from "./lyrics/fetch.ts";
 import { applyLyrics, clearLyrics } from "./lyrics/apply.ts";
-import { buildPage, updateNowBar, showLoader, showNotice } from "./renderer.ts";
+import {
+  buildPage,
+  updateNowBar,
+  showLoader,
+  showNotice,
+  swapNowBarSide,
+  toggleCompactMode,
+  isCompactModeActive,
+} from "./renderer.ts";
 import { setupMediaBoxControls, type MediaBoxHandle } from "./mediabox.ts";
 import { togglePip, pipSupported } from "./pip.ts";
 import { toggleVideoPip, setPipLyrics } from "./mobilepip.ts";
@@ -85,7 +93,13 @@ async function main(): Promise<void> {
       if (pipSupported()) void togglePip();
       else void toggleVideoPip();
     },
+    onSwapSides: () => swapNowBarSide(),
+    onToggleCompact: () => toggleCompactMode(),
   });
+
+  // Narrow viewports start in compact mode automatically — reflect that in the
+  // cover control's icon.
+  media.setCompactActive(isCompactModeActive());
 
   document.addEventListener("fullscreenchange", () =>
     media.setFullscreenActive(!!document.fullscreenElement)
