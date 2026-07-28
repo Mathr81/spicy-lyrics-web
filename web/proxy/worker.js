@@ -71,6 +71,48 @@ function needsSessionAuth(bodyBuffer) {
   }
 }
 
+// If the body is a single `lyrics` query, return the track id used as the cache
+// key; otherwise null (only plain lyric lookups are edge-cached, never session
+// ops or multi-operation batches).
+function lyricsCacheId(bodyBuffer) {
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(bodyBuffer));
+    const queries = Array.isArray(parsed?.queries) ? parsed.queries : [];
+    if (queries.length !== 1) return null;
+    const q = queries[0];
+    const id = q?.variables?.id;
+    if (q?.operation === "lyrics" && typeof id === "string" && /^[A-Za-z0-9]+$/.test(id)) {
+      return id;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// The /query endpoint returns HTTP 200 with a per-operation `httpStatus` inside;
+// pull that inner status so we only cache real results (200) / definite misses
+// (404), never queued (503) or transient errors.
+function lyricsResultStatus(bodyBuffer) {
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(bodyBuffer));
+    const queries = Array.isArray(parsed?.queries) ? parsed.queries : [];
+    const result =
+      queries.find((q) => q?.operationId === "0")?.result ?? queries[0]?.result;
+    return typeof result?.httpStatus === "number" ? result.httpStatus : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function cacheRespHeaders(request, cachedResponse, state) {
+  const h = new Headers();
+  h.set("Content-Type", cachedResponse.headers.get("Content-Type") || "application/json");
+  h.set("X-Spicy-Cache", state);
+  for (const [k, v] of Object.entries(corsHeaders(request))) h.set(k, v);
+  return h;
+}
+
 function openSpotifyHeaders(env) {
   const h = {
     "User-Agent": SPOTIFY_UA,
@@ -206,7 +248,7 @@ async function getWebPlayerToken(env) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders(request) });
     }
@@ -268,13 +310,70 @@ export default {
       headers.set("Authorization", `Bearer ${webPlayerToken}`);
     }
 
+    // Edge cache for lyric lookups. Lyrics are immutable per track, so the first
+    // device to request a song populates the cache and every later request (any
+    // device through this Worker) is served from the edge without hitting Spicy
+    // Lyrics again — collapsing N devices into one upstream call per song. Only
+    // single `lyrics` queries are cached; session ops always pass through. The
+    // cached entry stores just the body (no per-request CORS), so CORS headers
+    // are re-applied fresh on every response.
+    const cacheId = body ? lyricsCacheId(body) : null;
+    const cache = caches.default;
+    const cacheKey = cacheId
+      ? new Request(`https://slcache.internal/lyrics/${cacheId}`, { method: "GET" })
+      : null;
+
+    if (cacheKey) {
+      const hit = await cache.match(cacheKey);
+      if (hit) {
+        const cachedBody = await hit.arrayBuffer();
+        return new Response(cachedBody, {
+          status: 200,
+          headers: cacheRespHeaders(request, hit, "hit"),
+        });
+      }
+    }
+
     const upstream = await fetch(target, { method: request.method, headers, body });
 
-    const respHeaders = new Headers(upstream.headers);
+    // Non-cacheable (session ops, non-lyrics): stream straight through as before.
+    if (!cacheKey) {
+      const respHeaders = new Headers(upstream.headers);
+      for (const [k, v] of Object.entries(corsHeaders(request))) {
+        respHeaders.set(k, v);
+      }
+      return new Response(upstream.body, {
+        status: upstream.status,
+        statusText: upstream.statusText,
+        headers: respHeaders,
+      });
+    }
+
+    // Cacheable path: buffer so we can inspect the inner result and store it.
+    const buf = await upstream.arrayBuffer();
+    const contentType = upstream.headers.get("Content-Type") || "application/json";
+    const innerStatus = lyricsResultStatus(buf);
+
+    // Cache a found result for a long time; a definite "not found" briefly (so a
+    // song without lyrics isn't re-queried every play). Never cache 503 (queued)
+    // or transient errors.
+    let ttl = 0;
+    if (upstream.status === 200 && innerStatus === 200) ttl = 604800; // 7 days
+    else if (upstream.status === 200 && innerStatus === 404) ttl = 3600; // 1 hour
+    if (ttl > 0) {
+      const toCache = new Response(buf, {
+        headers: { "Content-Type": contentType, "Cache-Control": `max-age=${ttl}` },
+      });
+      ctx.waitUntil(cache.put(cacheKey, toCache));
+    }
+
+    const respHeaders = new Headers();
+    respHeaders.set("Content-Type", contentType);
+    respHeaders.set("X-Spicy-Cache", "miss");
     for (const [k, v] of Object.entries(corsHeaders(request))) {
       respHeaders.set(k, v);
     }
-    return new Response(upstream.body, {
+    return new Response(buf, {
       status: upstream.status,
       statusText: upstream.statusText,
       headers: respHeaders,
