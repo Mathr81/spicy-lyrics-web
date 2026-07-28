@@ -37,6 +37,7 @@ export interface MediaBoxCallbacks {
   onTogglePip: () => void;
   onSwapSides: () => void;
   onToggleCompact: () => boolean;
+  onOpenSettings: () => void;
 }
 
 export interface MediaBoxHandle {
@@ -69,6 +70,7 @@ export function setupMediaBoxControls(
       ${sdkSupported ? `<button class="ViewControl ListenHere" title="Écouter dans cet onglet">${DEVICE_ICON}</button>` : ""}
       ${pipSupported() || videoPipSupported() ? `<button class="ViewControl PipToggle" title="Picture-in-Picture">${Icons.PiPMode}</button>` : ""}
       ${fullscreenSupported ? `<button class="ViewControl FullscreenToggle" title="Plein écran">${Icons.Fullscreen}</button>` : ""}
+      <button class="ViewControl SettingsToggle" title="Réglages">${Icons.Settings}</button>
     </div>
     <div class="PlaybackControls">
       <div class="PlaybackControl ShuffleToggle">${Icons.Shuffle}</div>
@@ -90,11 +92,13 @@ export function setupMediaBoxControls(
   const pipBtn = mediaContent.querySelector<HTMLElement>(".PipToggle");
   const swapBtn = mediaContent.querySelector<HTMLElement>(".NowBarSideToggle");
   const compactBtn = mediaContent.querySelector<HTMLElement>(".CompactModeToggle");
+  const settingsBtn = mediaContent.querySelector<HTMLElement>(".SettingsToggle");
   fullBtn?.addEventListener("click", cb.onToggleFullscreen);
   romBtn?.addEventListener("click", cb.onToggleRomanization);
   listenBtn?.addEventListener("click", cb.onEnableSdk);
   pipBtn?.addEventListener("click", cb.onTogglePip);
   swapBtn?.addEventListener("click", cb.onSwapSides);
+  settingsBtn?.addEventListener("click", cb.onOpenSettings);
   const setCompactIcon = (active: boolean) => {
     if (compactBtn)
       compactBtn.innerHTML = active

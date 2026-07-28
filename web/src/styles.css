@@ -111,26 +111,15 @@ body {
   --LyricsRightSidePadding: 6cqw !important;
 }
 
-/* iOS Safari intermittently collapses the bottom PlaybackControls row (shuffle /
-   prev / play / next / loop) so only the top ViewControls and the timeline show
-   on the cover. The row and its buttons size themselves through a container-query
-   chain that nests a `container-type: size` element (`.PlaybackControls`) inside
-   another (`.MediaBox`); iOS resolves that unreliably and can zero the buttons'
-   height. Pin concrete heights straight off `.MediaBox` (which resolves fine) and
-   drop the intermediate size-container so the controls always render. The widths
-   were already ~equal to their MediaBox-relative values, since PlaybackControls
-   spans the full cover width. */
-#SpicyLyricsPage.iOS.Fullscreen
-  .ContentBox
-  .NowBar
-  .Header
-  .MediaBox
-  .MediaContent
-  .PlaybackControls {
-  container-type: normal !important;
-  height: 13cqh !important;
-}
-
+/* iOS bottom PlaybackControls invisible (only the top ViewControls + timeline
+   showed on the cover). Root cause: the playback icons (play / pause / skip /
+   shuffle / loop) are `<svg viewBox="…">` with NO width/height attributes, and
+   iOS Safari collapses such SVGs to 0×0 when their box is sized through container
+   queries — whereas the ViewControls icons carry `width="24" height="24"` and so
+   always render. Desktop Chromium stretches the viewBox-only SVGs to fill the
+   flex item; iOS doesn't. Give the playback SVGs a concrete height (width auto
+   keeps each icon's aspect ratio) so iOS renders them. Scoped to iOS to leave the
+   working desktop rendering untouched. */
 #SpicyLyricsPage.iOS.Fullscreen
   .ContentBox
   .NowBar
@@ -138,8 +127,11 @@ body {
   .MediaBox
   .MediaContent
   .PlaybackControls
-  .PlaybackControl {
-  height: 13cqh !important;
+  .PlaybackControl
+  svg {
+  height: 46%;
+  width: auto;
+  max-width: 100%;
 }
 
 /* --------------------------------------------------------------------- */
@@ -221,4 +213,157 @@ body {
 
 .sl-status.visible {
   opacity: 1;
+}
+
+/* --------------------------------------------------------------------- */
+/* "Playing in Picture-in-Picture" notice shown in the emptied main tab  */
+/* --------------------------------------------------------------------- */
+.sl-pip-notice {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  text-align: center;
+}
+
+.sl-pip-notice-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  max-width: 460px;
+}
+
+.sl-pip-notice-icon {
+  font-size: 44px;
+  line-height: 1;
+  opacity: 0.9;
+}
+
+.sl-pip-notice-title {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.sl-pip-notice-sub {
+  font-size: 15px;
+  color: rgba(255, 255, 255, 0.66);
+  line-height: 1.5;
+}
+
+/* --------------------------------------------------------------------- */
+/* Settings overlay                                                      */
+/* --------------------------------------------------------------------- */
+.sl-settings-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.5);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+}
+
+.sl-settings-overlay[hidden] {
+  display: none;
+}
+
+.sl-settings-card {
+  width: min(440px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 24px;
+  border-radius: 20px;
+  background: rgba(24, 24, 27, 0.92);
+  box-shadow: 0 24px 60px -12px rgba(0, 0, 0, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.sl-settings-title {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin-bottom: 10px;
+}
+
+.sl-settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 4px;
+  cursor: pointer;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.sl-settings-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.sl-settings-label {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.sl-settings-desc {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.55);
+  line-height: 1.4;
+}
+
+.sl-settings-switch {
+  flex-shrink: 0;
+  width: 46px;
+  height: 28px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+  position: relative;
+  transition: background 0.2s;
+}
+
+.sl-settings-switch.on {
+  background: #1db954;
+}
+
+.sl-settings-knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.2s;
+}
+
+.sl-settings-switch.on .sl-settings-knob {
+  transform: translateX(18px);
+}
+
+.sl-settings-close {
+  margin-top: 16px;
+  appearance: none;
+  border: 0;
+  border-radius: 999px;
+  padding: 12px;
+  font-size: 15px;
+  font-weight: 600;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.sl-settings-close:hover {
+  background: rgba(255, 255, 255, 0.18);
 }

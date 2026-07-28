@@ -28,6 +28,7 @@ import {
 import { SpotifyPlayer } from "./shim/SpotifyPlayer.ts";
 import { type SimpleTrack } from "./spotify/api.ts";
 import { fetchLyrics } from "./lyrics/fetch.ts";
+import { initSession } from "./lyrics/session.ts";
 import { applyLyrics, clearLyrics } from "./lyrics/apply.ts";
 import {
   buildPage,
@@ -42,6 +43,7 @@ import { setupMediaBoxControls, type MediaBoxHandle } from "./mediabox.ts";
 import { togglePip, pipSupported } from "./pip.ts";
 import { toggleVideoPip, setPipLyrics } from "./mobilepip.ts";
 import { renderShell, type ShellHandle } from "./ui.ts";
+import { setupSettings, type SettingsHandle } from "./settings.ts";
 import { $romanization } from "@src/utils/uiState.ts";
 import LoadFonts, { ApplyFontPixel } from "@src/components/Styling/Fonts.ts";
 import Fullscreen from "./shim/Fullscreen.ts";
@@ -58,6 +60,7 @@ let lastLyricsData: any = null;
 let hadTrack = true;
 let shell: ShellHandle;
 let media: MediaBoxHandle;
+let settings: SettingsHandle;
 const lastLyricsInfo = { type: "—", source: "—", lines: 0, translit: false };
 
 async function main(): Promise<void> {
@@ -69,6 +72,13 @@ async function main(): Promise<void> {
   ApplyFontPixel();
 
   shell = renderShell(root, { onLogin: () => void login() });
+
+  settings = setupSettings({
+    getPage: () => page,
+    reapply: () => {
+      if (lastLyricsData) applyLyrics(lastLyricsData, $romanization.get());
+    },
+  });
 
   // All controls live on the cover, like the extension.
   media = setupMediaBoxControls(page, {
@@ -95,6 +105,7 @@ async function main(): Promise<void> {
     },
     onSwapSides: () => swapNowBarSide(),
     onToggleCompact: () => toggleCompactMode(),
+    onOpenSettings: () => settings.open(),
   });
 
   // Narrow viewports start in compact mode automatically — reflect that in the
@@ -134,6 +145,10 @@ async function main(): Promise<void> {
   }
 
   shell.setLoggedIn(true);
+
+  // Open and keep an API lyrics session alive (the API rate-limits sessionless
+  // traffic). Runs in the background; lyric fetching works regardless.
+  initSession();
 
   // Mirror the active Spotify device by default. Playback in this tab (SDK) is
   // opt-in via the cover's "listen here" control — never grabbed on load.
