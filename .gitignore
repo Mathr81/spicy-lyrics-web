@@ -177,3 +177,5 @@ src/components/cli-sync
 .claude/settings.local.json
 
 CHANGELOG.md
+# Extension build artifacts (regenerate with: bun run build)
+builds/
