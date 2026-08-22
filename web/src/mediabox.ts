@@ -56,10 +56,20 @@ export function setupMediaBoxControls(
     ".NowBar .Header .MediaBox .MediaContent"
   )!;
 
-  const fullscreenSupported =
-    typeof document.fullscreenEnabled === "boolean"
-      ? document.fullscreenEnabled
-      : "requestFullscreen" in document.documentElement;
+  // Include the webkit-prefixed API so the control shows on iPad Safari (which
+  // only implements fullscreen under that prefix). In "Add to Home Screen"
+  // standalone mode iOS exposes no fullscreen API, so the button correctly stays
+  // hidden there.
+  const de = document as Document & { webkitFullscreenEnabled?: boolean };
+  const el = document.documentElement as HTMLElement & {
+    webkitRequestFullscreen?: unknown;
+  };
+  const fullscreenSupported = !!(
+    de.fullscreenEnabled ||
+    de.webkitFullscreenEnabled ||
+    "requestFullscreen" in el ||
+    "webkitRequestFullscreen" in el
+  );
   const sdkSupported = SDK_SUPPORTED;
 
   mediaContent.innerHTML = `

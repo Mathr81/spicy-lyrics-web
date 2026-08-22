@@ -112,9 +112,12 @@ async function main(): Promise<void> {
   // cover control's icon.
   media.setCompactActive(isCompactModeActive());
 
-  document.addEventListener("fullscreenchange", () =>
-    media.setFullscreenActive(!!document.fullscreenElement)
-  );
+  const onFsChange = () => {
+    const d = document as Document & { webkitFullscreenElement?: Element | null };
+    media.setFullscreenActive(!!(d.fullscreenElement ?? d.webkitFullscreenElement));
+  };
+  document.addEventListener("fullscreenchange", onFsChange);
+  document.addEventListener("webkitfullscreenchange", onFsChange);
 
   // Offline preview: ?demo drives the engine with a built-in sample.
   const params = new URLSearchParams(window.location.search);
