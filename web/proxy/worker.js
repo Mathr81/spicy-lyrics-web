@@ -90,6 +90,10 @@ const OK = 200;
 const SESSION_DEAD = 403;
 const CREATE_BACKOFF_BASE_MS = 15000;
 const CREATE_BACKOFF_MAX_MS = 900000; // 15 min — a dead cookie must not be retried hot
+// Every upstream call waits on the minted token, so a token fetch that hangs
+// wedges the whole proxy. Bound it: falling back to "no token" degrades to
+// unsynced lyrics, which is far better than never answering.
+const MINT_TIMEOUT_MS = 8000;
 
 // --- config -----------------------------------------------------------------
 
@@ -103,6 +107,9 @@ function num(v, fallback) {
 function cfg(env) {
   const e = env || {};
   return {
+    // Overridable so the proxy can be pointed at a mirror — and so the host's
+    // end-to-end tests can run against a stub instead of the real API.
+    apiOrigin: (e.API_ORIGIN || API_ORIGIN).replace(/\/$/, ""),
     logLevel: LEVELS[String(e.LOG_LEVEL || "info").toLowerCase()] ?? LEVELS.info,
     clientVersion: e.CLIENT_VERSION || "6.3.12",
     lyricsCacheTtl: num(e.LYRICS_CACHE_TTL, 604800),
@@ -318,6 +325,7 @@ async function getServerTime(env) {
   try {
     const res = await fetch("https://open.spotify.com/api/server-time", {
       headers: openSpotifyHeaders(env),
+      signal: AbortSignal.timeout(MINT_TIMEOUT_MS),
     });
     const json = await res.json();
     if (json && json.serverTime) return Number(json.serverTime);
@@ -336,7 +344,10 @@ async function getSecretDict(env) {
   }
   try {
     const url = (env && env.SECRET_DICT_URL) || SECRET_DICT_URL;
-    const res = await fetch(url, { headers: { Accept: "application/json" } });
+    const res = await fetch(url, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(MINT_TIMEOUT_MS),
+    });
     if (res.ok) {
       const dict = await res.json();
       if (dict && typeof dict === "object" && Object.keys(dict).length) {
@@ -371,7 +382,10 @@ async function mintToken(env) {
         `https://open.spotify.com/api/token?reason=${reason}&productType=web-player` +
         `&totp=${code}&totpServer=${code}&totpVer=${ver}`;
       try {
-        const res = await fetch(url, { headers: openSpotifyHeaders(env) });
+        const res = await fetch(url, {
+          headers: openSpotifyHeaders(env),
+          signal: AbortSignal.timeout(MINT_TIMEOUT_MS),
+        });
         if (!res.ok) continue;
         const json = await res.json().catch(() => null);
         if (json && json.accessToken && !json.isAnonymous) {
@@ -493,7 +507,7 @@ export class SpicySession {
     const token = await getWebPlayerToken(this.env);
     const started = Date.now();
     try {
-      const res = await fetch(`${API_ORIGIN}/query`, {
+      const res = await fetch(`${cfg(this.env).apiOrigin}/query`, {
         method: "POST",
         headers: upstreamHeaders(this.env, token, withAuthorization),
         body: JSON.stringify({
@@ -679,7 +693,7 @@ export class SpicySession {
     const token = await getWebPlayerToken(this.env);
     const started = Date.now();
     try {
-      const res = await fetch(`${API_ORIGIN}/query`, {
+      const res = await fetch(`${cfg(this.env).apiOrigin}/query`, {
         method: "POST",
         headers: upstreamHeaders(this.env, token, false),
         body: bodyText,
@@ -805,7 +819,7 @@ async function memUpstream(env, queries, withAuthorization, tag) {
   const log = makeLog(env, "hub-mem");
   const token = await getWebPlayerToken(env);
   try {
-    const res = await fetch(`${API_ORIGIN}/query`, {
+    const res = await fetch(`${cfg(env).apiOrigin}/query`, {
       method: "POST",
       headers: upstreamHeaders(env, token, withAuthorization),
       body: JSON.stringify({ queries, client: { version: cfg(env).clientVersion } }),
@@ -880,7 +894,7 @@ async function memLyrics(env, id, bodyText) {
   memHub.stats.lyricsUpstream++;
   p = (async () => {
     const token = await getWebPlayerToken(env);
-    const res = await fetch(`${API_ORIGIN}/query`, {
+    const res = await fetch(`${cfg(env).apiOrigin}/query`, {
       method: "POST",
       headers: upstreamHeaders(env, token, false),
       body: bodyText,
@@ -1090,7 +1104,7 @@ export default {
     }
     headers.set("X-mode", request.headers.get("X-mode") || "2");
 
-    const upstream = await fetch(API_ORIGIN + inUrl.pathname + inUrl.search, {
+    const upstream = await fetch(c.apiOrigin + inUrl.pathname + inUrl.search, {
       method: request.method,
       headers,
       body,

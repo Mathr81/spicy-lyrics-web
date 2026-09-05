@@ -242,11 +242,55 @@ cookie is not the problem.
 The API's own response carries this notice: *"Access is granted solely for
 personal, individual use through official Spicy Lyrics clients or their public
 forks of official repositories."* Personal use through a fork is what this build
-is; the sensible fixes are to host the proxy somewhere other than Cloudflare
-Workers (any small VPS, a home server, or another function host — `worker.js` is
-plain JS with no Workers-only APIs beyond `caches`/Durable Objects, both of which
-have local equivalents), or to ask the Spicy Lyrics maintainers. Do not try to
-defeat the block by rotating addresses or disguising the client.
+is; the sensible fixes are to run the proxy from an ordinary machine (see below)
+or to ask the Spicy Lyrics maintainers. Do not try to defeat the block by
+rotating addresses or disguising the client.
+
+## Running the proxy outside Cloudflare (`web/server/`)
+
+`web/server/server.mjs` runs **the same `web/proxy/worker.js`**, unmodified, on
+plain Node — on a VPS, a home server or in a container. It is not a second
+implementation: Node 20 already provides `fetch`/`Request`/`Response`/
+`crypto.subtle`, so the host only supplies the two things Workers adds — a
+`caches.default` (memory + disk, so the 7-day lyric cache survives a restart) and
+a Durable Object runtime (one process is one instance, with storage in a JSON
+file and the keep-alive alarm on a timer). The shared session, the coalescing and
+the TOTP token minting therefore cannot drift between the two hosts.
+
+```bash
+cd web/server
+SP_DC='<your sp_dc cookie>' node server.mjs      # listens on :8787
+npm test                                          # offline end-to-end test
+```
+
+Docker (from the repo root) or systemd:
+
+```bash
+docker build -f web/server/Dockerfile -t spicy-lyrics-proxy .
+docker run -d --name spicy-lyrics-proxy -p 8787:8787 \
+  -e SP_DC='<your sp_dc cookie>' -v spicy-proxy-state:/state \
+  --restart unless-stopped spicy-lyrics-proxy
+```
+
+`web/server/spicy-lyrics-proxy.service` is a hardened unit file; put `SP_DC` in a
+`systemctl edit` drop-in rather than in the unit itself.
+
+Configuration is the same names as the Worker's `[vars]`, read from the
+environment: `SP_DC`, `PORT` (8787), `STATE_DIR` (`./.state`), `LOG_LEVEL`,
+`CLIENT_VERSION`, `LYRICS_CACHE_TTL`, `LYRICS_MISS_CACHE_TTL`,
+`CLIENT_PING_INTERVAL_MS`, `CLIENT_SESSION_TTL_S`, `SESSION_IDLE_MS`, and
+`API_ORIGIN` if you ever need to point it at a mirror.
+
+Then set `VITE_LYRICS_API` to the host's URL and rebuild the page.
+
+> **Serve it over HTTPS.** If the page is on HTTPS (GitHub Pages) and the proxy
+> is on plain `http://`, the browser blocks the request as mixed content and
+> nothing loads. Put [Caddy](https://caddyserver.com/) (automatic certificates)
+> or a Cloudflare Tunnel in front. A tunnel is a good fit for a home server with
+> no public address — it only handles traffic *in*; requests to the lyrics API
+> still leave from your own connection, which is the point of moving off Workers.
+> The Screen Wake Lock also needs a secure context, so HTTPS is required for the
+> iPad to stay awake.
 
 ## Synced lyrics (the `SP_DC` secret)
 
