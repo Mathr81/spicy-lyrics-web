@@ -13,6 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import { fileURLToPath } from "node:url";
+import { startSocks5 } from "./proxy-servers.test-helper.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const STATE = fs.mkdtempSync(path.join(os.tmpdir(), "slproxy-"));
@@ -50,13 +51,27 @@ await new Promise((r) => api.listen(0, "127.0.0.1", r));
 const API_ORIGIN = `http://127.0.0.1:${api.address().port}`;
 
 // --- host under test -------------------------------------------------------
-const PORT = 8799;
+// Take whatever port the OS hands out rather than a fixed one: a leftover
+// process from an earlier run must not turn into a confusing EADDRINUSE.
+const PORT = await new Promise((resolve) => {
+  const probe = http.createServer();
+  probe.listen(0, "127.0.0.1", () => {
+    const { port } = probe.address();
+    probe.close(() => resolve(port));
+  });
+});
 const BASE = `http://127.0.0.1:${PORT}`;
 
-function startHost() {
+function startHost(extraEnv = {}) {
   const child = spawn(process.execPath, [path.join(HERE, "server.mjs")], {
     env: {
       ...process.env,
+      // The machine running the tests may well have proxy variables set for
+      // unrelated reasons; each scenario states its own.
+      PROXY_URL: "",
+      ALL_PROXY: "",
+      all_proxy: "",
+      ...extraEnv,
       PORT: String(PORT),
       STATE_DIR: STATE,
       API_ORIGIN,
@@ -152,7 +167,26 @@ check("stats show the gap between asked and forwarded",
   `clientOps=${stats.stats.clientOps} createSession=${stats.stats.createSession}`);
 check("no upstream block seen against a normal host", stats.upstreamBlocked === null);
 
+// 5. The whole host works through an outbound SOCKS5 proxy, and really uses it.
 host.kill("SIGTERM");
+await new Promise((r) => setTimeout(r, 600));
+
+const socks = startSocks5();
+await socks.listen();
+host = startHost({ PROXY_URL: `socks5://127.0.0.1:${socks.server.address().port}` });
+await waitReady();
+
+upstream.calls.length = 0;
+const proxied = await q(lyricsOp("TrackViaProxy"));
+check("PROXY_URL: lyrics still resolve", proxied.status === 200);
+check("PROXY_URL: the upstream call reached the API", upstream.calls.includes("lyrics"));
+check("PROXY_URL: and it went through the SOCKS5 proxy, not direct",
+  socks.state.targets.some((t) => t.endsWith(`:${api.address().port}`)),
+  socks.state.targets.join(",") || "(nothing brokered)");
+
+host.kill("SIGTERM");
+await new Promise((r) => setTimeout(r, 300));
+socks.server.close();
 api.close();
 fs.rmSync(STATE, { recursive: true, force: true });
 console.log(failed ? `\n${failed} FAILED` : "\nall good");

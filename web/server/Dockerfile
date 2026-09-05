@@ -5,6 +5,11 @@
 #     -e SP_DC=<your sp_dc cookie> -v spicy-proxy-state:/state \
 #     --restart unless-stopped spicy-lyrics-proxy
 #
+# To send the proxy's own outbound traffic through a SOCKS5/CONNECT proxy, add
+#   -e PROXY_URL=socks5://host.docker.internal:1080 \
+#   --add-host=host.docker.internal:host-gateway
+# (inside a container 127.0.0.1 is the container itself, not your host).
+#
 # No dependencies to install: the proxy uses only Node's built-ins.
 FROM node:22-alpine
 

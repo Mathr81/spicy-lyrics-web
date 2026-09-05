@@ -22,6 +22,9 @@
 //   SP_DC                    required for synced lyrics (your Spotify cookie)
 //   PORT                     default 8787
 //   STATE_DIR                default ./.state — session + lyric cache on disk
+//   PROXY_URL                send the proxy's OWN outbound requests through
+//                            another proxy, e.g. socks5://127.0.0.1:1080
+//                            (also read from ALL_PROXY / HTTPS_PROXY / HTTP_PROXY)
 //   LOG_LEVEL                debug | info | warn | error | silent
 //   CLIENT_VERSION, LYRICS_CACHE_TTL, LYRICS_MISS_CACHE_TTL,
 //   CLIENT_PING_INTERVAL_MS, CLIENT_SESSION_TTL_S, SESSION_IDLE_MS
@@ -36,6 +39,11 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { installProxyFetch, parseProxyUrl } from "./outbound.mjs";
+
+function log(...args) {
+  console.log(new Date().toISOString(), ...args);
+}
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WORKER = path.join(HERE, "..", "proxy", "worker.js");
@@ -45,6 +53,25 @@ const STATE_FILE = path.join(STATE_DIR, "session.json");
 const PORT = Number(process.env.PORT || 8787);
 
 fs.mkdirSync(CACHE_DIR, { recursive: true });
+
+// --- outbound proxy --------------------------------------------------------
+// Optional: route everything this process sends (the lyrics API and Spotify's
+// token endpoints alike) through a SOCKS5 or HTTP CONNECT proxy. Installed
+// before worker.js is imported so no outbound call can take the direct path.
+// Deliberately NOT read from HTTPS_PROXY / HTTP_PROXY. Those are commonly set
+// on a machine for unrelated reasons (apt, curl, a corporate setup), and picking
+// them up silently would reroute this process's traffic — Spotify tokens
+// included — somewhere the operator never chose. Proxying here is opt-in:
+// `PROXY_URL`, or `ALL_PROXY`, whose whole meaning is "proxy everything".
+// If HTTPS_PROXY is what you want, say so: PROXY_URL="$HTTPS_PROXY".
+const PROXY_VARS = ["PROXY_URL", "ALL_PROXY", "all_proxy"];
+const proxyVar = PROXY_VARS.find((name) => process.env[name]);
+
+let outboundProxy = null;
+if (proxyVar) {
+  outboundProxy = parseProxyUrl(process.env[proxyVar]);
+  installProxyFetch(outboundProxy, () => {});
+}
 
 // --- `caches.default` ------------------------------------------------------
 // The Worker stores lyric bodies keyed by a synthetic URL, with a max-age. Same
@@ -196,10 +223,6 @@ armAlarm();
 
 // --- HTTP server -----------------------------------------------------------
 
-function log(...args) {
-  console.log(new Date().toISOString(), ...args);
-}
-
 // Hop-by-hop headers describe this connection, not the request; forwarding them
 // into a `Request` is meaningless and undici rejects some outright.
 const HOP_BY_HOP = new Set([
@@ -255,6 +278,12 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, () => {
   log(`spicy-lyrics proxy listening on http://0.0.0.0:${PORT}`);
   log(`state: ${STATE_DIR}`);
+  // Always say where outbound traffic goes — it must never be a surprise.
+  log(
+    outboundProxy
+      ? `outbound proxy: ${outboundProxy.label} (from ${proxyVar})`
+      : "outbound proxy: none (direct) — set PROXY_URL to route through one"
+  );
   if (!process.env.SP_DC) {
     log("WARNING: SP_DC is not set — synced lyrics will be unavailable (text only).");
   }

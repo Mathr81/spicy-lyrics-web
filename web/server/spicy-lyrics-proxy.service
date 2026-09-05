@@ -17,6 +17,9 @@ Type=simple
 ExecStart=/usr/bin/node %h/spicy-lyrics-web/web/server/server.mjs
 Environment=PORT=8787
 Environment=STATE_DIR=%S/spicy-lyrics-proxy
+# Route this service's own outbound requests through a proxy, e.g. a local
+# SOCKS5 tunnel. Omit for a direct connection.
+# Environment=PROXY_URL=socks5://127.0.0.1:1080
 # Environment=SP_DC=...        <- put this in a drop-in, not here
 StateDirectory=spicy-lyrics-proxy
 Restart=always
@@ -28,7 +31,7 @@ ProtectSystem=strict
 ProtectHome=read-only
 ProtectKernelTunables=true
 ProtectControlGroups=true
-RestrictAddressFamilies=AF_INET AF_INET6
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
 [Install]
 WantedBy=multi-user.target

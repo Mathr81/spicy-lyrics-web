@@ -260,7 +260,7 @@ the TOTP token minting therefore cannot drift between the two hosts.
 ```bash
 cd web/server
 SP_DC='<your sp_dc cookie>' node server.mjs      # listens on :8787
-npm test                                          # offline end-to-end test
+npm test                                          # offline end-to-end tests
 ```
 
 Docker (from the repo root) or systemd:
@@ -280,6 +280,40 @@ environment: `SP_DC`, `PORT` (8787), `STATE_DIR` (`./.state`), `LOG_LEVEL`,
 `CLIENT_VERSION`, `LYRICS_CACHE_TTL`, `LYRICS_MISS_CACHE_TTL`,
 `CLIENT_PING_INTERVAL_MS`, `CLIENT_SESSION_TTL_S`, `SESSION_IDLE_MS`, and
 `API_ORIGIN` if you ever need to point it at a mirror.
+
+### Sending the proxy's own traffic through another proxy
+
+`PROXY_URL` routes everything this process sends — the lyrics API *and*
+Spotify's token endpoints — through a SOCKS5 or HTTP CONNECT proxy:
+
+```bash
+PROXY_URL=socks5://127.0.0.1:1080 SP_DC='…' node server.mjs
+PROXY_URL=socks5://user:pass@127.0.0.1:1080 …     # with credentials
+PROXY_URL=http://127.0.0.1:3128 …                 # an HTTP CONNECT proxy
+PROXY_URL=127.0.0.1:1080 …                        # bare host:port means socks5
+```
+
+`socks5://` and `socks5h://` behave identically: the hostname is always resolved
+*by the proxy*, never locally, which is the only sensible behaviour for a tunnel
+meant to change your exit path. `ALL_PROXY` works too.
+
+> `HTTPS_PROXY` / `HTTP_PROXY` are deliberately **not** picked up. They are
+> commonly set on a machine for unrelated reasons, and inheriting them silently
+> would reroute this process's traffic — Spotify tokens included — somewhere you
+> never chose. If that is what you want, say it: `PROXY_URL="$HTTPS_PROXY"`.
+
+The startup log always states where outbound traffic goes, and a proxy that
+cannot be reached fails the request rather than quietly falling back to a direct
+connection.
+
+In Docker, `127.0.0.1` is the *container*, not your host. Use `--network host`,
+or `--add-host=host.docker.internal:host-gateway` with
+`PROXY_URL=socks5://host.docker.internal:1080`.
+
+No dependency was added for this: `web/server/outbound.mjs` implements the
+SOCKS5 (RFC 1928/1929) and CONNECT handshakes and hands the resulting socket to
+Node's own HTTP client, so only the two handshakes are hand-written — everything
+above them, TLS included, is Node's.
 
 Then set `VITE_LYRICS_API` to the host's URL and rebuild the page.
 

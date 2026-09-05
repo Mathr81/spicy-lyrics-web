@@ -6,7 +6,9 @@
   "description": "Standalone Node host that runs web/proxy/worker.js outside Cloudflare Workers.",
   "scripts": {
     "start": "node server.mjs",
-    "test": "node server.test.mjs"
+    "test": "node server.test.mjs && node outbound.test.mjs",
+    "test:host": "node server.test.mjs",
+    "test:outbound": "node outbound.test.mjs"
   },
   "engines": {
     "node": ">=20.11"
