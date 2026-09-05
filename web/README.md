@@ -206,6 +206,48 @@ the client ping interval, the idle timeout, `LOG_LEVEL`, `CLIENT_VERSION`) — n
 code change to adjust any of it. `npm test` inside `web/proxy/` runs an offline
 smoke test that asserts the "4 devices → 1 request" behaviour.
 
+### If the API blocks the proxy
+
+`api.spicylyrics.org` sits behind Cloudflare and its WAF can refuse traffic
+outright — including, as of this writing, requests coming from Cloudflare
+Workers. The symptom is a Cloudflare "Sorry, you have been blocked" HTML page
+where an API response should be, for *every* operation, so nothing loads and the
+shared session never opens.
+
+The proxy names this rather than letting it look like a lyrics error:
+
+- `/__spicy/stats` reports `upstreamBlocked: { count, lastAt }` and
+  `sessionOpen: false`.
+- The logs carry `evt="upstream_blocked"` at `warn` level.
+- The page shows "L'API Spicy Lyrics refuse les requêtes du proxy" instead of a
+  generic failure, and the block page is never cached or handed to the JSON
+  parser.
+
+To confirm it is the network path and not your setup, send the same request from
+an ordinary machine — if that returns 200 and the Worker gets 403, the request
+shape is fine and the hosting location is what is being refused:
+
+```bash
+curl -s -X POST https://api.spicylyrics.org/query \
+  -H 'Content-Type: application/json' \
+  -H 'Origin: https://xpui.app.spotify.com' \
+  -H 'Referer: https://xpui.app.spotify.com/' \
+  -H 'SpicyLyrics-Version: 6.3.12' -H 'X-mode: 2' \
+  -d '{"queries":[{"operationId":"0","operation":"pingConfig","variables":{}}]}'
+```
+
+`/__spicy/tokencheck` returning `ok` at the same time confirms the `SP_DC`
+cookie is not the problem.
+
+The API's own response carries this notice: *"Access is granted solely for
+personal, individual use through official Spicy Lyrics clients or their public
+forks of official repositories."* Personal use through a fork is what this build
+is; the sensible fixes are to host the proxy somewhere other than Cloudflare
+Workers (any small VPS, a home server, or another function host — `worker.js` is
+plain JS with no Workers-only APIs beyond `caches`/Durable Objects, both of which
+have local equivalents), or to ask the Spicy Lyrics maintainers. Do not try to
+defeat the block by rotating addresses or disguising the client.
+
 ## Synced lyrics (the `SP_DC` secret)
 
 Spotify's **synced** (word/line-timed) lyrics come from an internal endpoint that

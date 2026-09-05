@@ -19,6 +19,13 @@ globalThis.fetch = async (url, init) => {
     const body = JSON.parse(init.body);
     const op = body.queries[0].operation;
     upstream.calls.push(op);
+    if (upstream.blockNext) {
+      return new Response(
+        "<!DOCTYPE html><html><head><title>Attention Required! | Cloudflare</title></head>" +
+          "<body><h1>Sorry, you have been blocked</h1>Cloudflare Ray ID: deadbeef</body></html>",
+        { status: 403, headers: { "Content-Type": "text/html; charset=UTF-8" } }
+      );
+    }
     await new Promise((r) => setTimeout(r, 30)); // make coalescing observable
     const data =
       op === "createSession" || op === "refreshSession"
@@ -168,6 +175,29 @@ check("stats show client ops >> upstream traffic",
   check("fallback (no DO): all four served", rs.every((r) => r.status === 200));
   const fs2 = await (await worker.fetch(new Request("https://proxy.test/__spicy/stats"), noDo, ctx)).json();
   check("fallback reports its weaker mode", fs2.mode === "isolate-fallback");
+}
+
+// 7. An upstream Cloudflare block page is named as such, not passed through as
+//    HTML and not cached.
+{
+  upstream.blockNext = true;
+  upstream.calls.length = 0;
+  const r = await post(lyricsOp("9ZzBlockedTrack"));
+  await settle();
+  check("upstream block → 403 to the page", r.status === 403);
+  check("upstream block flagged in a header", r.headers.get("X-Spicy-Upstream") === "blocked");
+  const j = await r.clone().json();
+  check("upstream block returns JSON, never the Cloudflare HTML", j.error === "upstream-blocked");
+  const stats2 = await (await worker.fetch(new Request("https://proxy.test/__spicy/stats"), env, ctx)).json();
+  check("upstream block counted in stats", stats2.upstreamBlocked?.count >= 1);
+
+  upstream.blockNext = false;
+  upstream.calls.length = 0;
+  const retry = await post(lyricsOp("9ZzBlockedTrack"));
+  await settle();
+  check("a block is never cached — the next try goes upstream again",
+    upstream.calls.filter((c) => c === "lyrics").length === 1);
+  check("and then succeeds", (await retry.json()).queries[0].result.data.Type === "Syllable");
 }
 
 globalThis.fetch = realFetch;
