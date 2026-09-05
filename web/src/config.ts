@@ -38,7 +38,7 @@ export const LYRICS_API: string =
 // Sent as the `SpicyLyrics-Version` header. Match the extension's version so the
 // API treats us as a known client. Keep in sync with project/config.ts.
 export const CLIENT_VERSION: string =
-  (import.meta as any).env?.VITE_SPICY_VERSION ?? "6.2.3";
+  (import.meta as any).env?.VITE_SPICY_VERSION ?? "6.3.12";
 
 // The Web Playback SDK is unsupported in mobile browsers (iOS/iPadOS Safari,
 // most mobile Chrome). We detect that to fall back to Spotify Connect mirror.

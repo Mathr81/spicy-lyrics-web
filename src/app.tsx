@@ -50,7 +50,7 @@ import "./css/polyfills/sonner-polyfill.css";
 import "./css/NPVLyrics.css";
 import UpdateDialog from "./components/ReactComponents/UpdateDialog.tsx";
 import { IsPIP, OpenPopupLyrics, ClosePopupLyrics } from "./components/Utils/PopupLyrics.ts";
-import { initNPVLyrics } from "./components/Utils/NPVLyrics.ts";
+import { GetNPVCardElement, initNPVLyrics } from "./components/Utils/NPVLyrics.ts";
 import ReactDOM from "react-dom/client";
 import { PopupModal } from "./components/Modal.ts";
 import { runThemeMatcher } from "./utils/themeMatcher.ts";
@@ -58,10 +58,11 @@ import "./utils/settings.ts";
 import SLToaster from "./components/ReactComponents/SLToaster.tsx";
 import { openSettingsPanel } from "./utils/settings.ts";
 import { exposeToWindow } from "./utils/expose.ts";
-import Logger from "./utils/logger.ts";
+import Logger from "./utils/Logger.ts";
 import Whentil from "./modules/Whentil.ts";
 import App from "./utils/app.ts";
 import { initSession } from "./utils/SessionManager/index.ts";
+import { jitter } from "./utils/jitter.ts";
 
 async function main() {
   const appLogger = new Logger("App");
@@ -90,6 +91,7 @@ async function main() {
     });
     return () => Global.Event.unListen(id);
   });
+  
 
   Global.SetScope("fullscreen.onclose", (cb: any) => {
     const id = Global.Event.listen("fullscreen:exit", () => {
@@ -521,34 +523,43 @@ async function main() {
       if (!sidebar) return;
 
       nowPlayingBarObserver = new MutationObserver((mutations) => {
+        // Resolved once per callback, not once per record.
+        const card = GetNPVCardElement();
         const shouldReapply = mutations.some((mutation) => {
-          // Ignore mutations inside the NPV lyrics card — its animating
-          // lyrics constantly rewrite style attributes, which would reset
-          // the debounce below forever and starve the npvbg apply. The
-          // card's own insertion/removal still passes (targets its parent).
+          // Cheap type/attribute test first — the ancestor walk below only runs
+          // for records that would otherwise schedule a re-apply.
+          if (mutation.type === "attributes") {
+            const name = mutation.attributeName;
+            if (name !== "src" && name !== "class" && name !== "inert") return false;
+          } else if (mutation.type !== "childList") {
+            return false;
+          }
+          // Ignore mutations inside the NPV lyrics card — the lyrics pipeline
+          // mutates it constantly, which would reset the debounce below forever
+          // and starve the npvbg apply. The card's own insertion/removal still
+          // passes (that mutation targets the card's parent).
           const target = mutation.target;
           const targetElement =
             target instanceof Element ? target : target.parentElement;
-          if (targetElement?.closest("#SpicyLyricsNPVCard")) return false;
-          if (mutation.type === "childList") return true;
-          if (mutation.type !== "attributes") return false;
-          return (
-            mutation.attributeName === "src" ||
-            mutation.attributeName === "style" ||
-            mutation.attributeName === "class" ||
-            mutation.attributeName === "inert"
-          );
+          return !(card && targetElement && card.contains(targetElement));
         });
 
         if (!shouldReapply) return;
         scheduleNowPlayingBarDynamicBackgroundApply();
       });
 
+      // `style` is deliberately absent from the filter: the lyrics animator
+      // rewrites inline styles on every mounted word and letter each frame, and
+      // the card lives inside this observed subtree. Including it made Blink
+      // allocate a MutationRecord per write — hundreds per frame — that this
+      // callback then had to walk and discard. Cover swaps already arrive via
+      // the `playback:songchange` handler, and DOM-driven re-renders via
+      // `childList` / `src` / `class`.
       nowPlayingBarObserver.observe(sidebar, {
         subtree: true,
         childList: true,
         attributes: true,
-        attributeFilter: ["src", "style", "class", "inert"],
+        attributeFilter: ["src", "class", "inert"],
       });
     };
 
@@ -914,6 +925,31 @@ async function main() {
     }
 
     {
+      // Volume changes from anywhere (Spotify's own slider, media keys, another
+      // device, our own setVolume) arrive on this native emitter, so there's nothing
+      // to poll. `_events` is an undocumented internal — if Spotify ever drops it the
+      // guard degrades us to "the volume slider doesn't auto-update" rather than
+      // throwing during startup.
+      Whentil.When(
+        () => Spicetify.Platform?.PlaybackAPI,
+        () => {
+          try {
+            Spicetify.Platform.PlaybackAPI?._events?.addListener?.(
+              "volume",
+              (e: { data?: { volume?: number } }) => {
+                const volume = e?.data?.volume;
+                if (typeof volume !== "number") return;
+                Global.Event.evoke("playback:volume", volume);
+              }
+            );
+          } catch (err) {
+            console.error("Spicy Lyrics: couldn't listen for volume changes", err);
+          }
+        }
+      );
+    }
+
+    {
       let lastPosition = 0;
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       new IntervalManager(0.5, () => {
@@ -944,19 +980,28 @@ async function main() {
           clearTimeout(lastTimeout);
           lastTimeout = undefined;
         }
-        lastTimeout = setTimeout(async () => {
+        lastTimeout = setTimeout(() => {
+          // Safety net: whatever is on screen belongs to `$currentLyricsData`.
+          // If that payload (or "no lyrics" sentinel) is for a different track
+          // than the one playing, the pipeline was raced — re-fetch so the
+          // playing track gets its own lyrics instead of the previous track's.
           const currentSongLyrics = $currentLyricsData.get();
-          if (
-            currentSongLyrics &&
-            currentSongLyrics !== `NO_LYRICS:${SpotifyPlayer.GetUri()}`
-          ) {
-            const parsedLyrics = JSON.parse(currentSongLyrics);
-            if (parsedLyrics?.uri !== SpotifyPlayer.GetUri()) {
-              const refetchUri = SpotifyPlayer.GetUri();
-              if (refetchUri) {
-                fetchLyrics(refetchUri).then(ApplyLyrics);
-              }
+          const refetchUri = SpotifyPlayer.GetUri();
+          if (!currentSongLyrics || !refetchUri) return;
+
+          let appliedUri: string | null = null;
+          if (currentSongLyrics.startsWith("NO_LYRICS:")) {
+            appliedUri = currentSongLyrics.slice("NO_LYRICS:".length);
+          } else {
+            try {
+              appliedUri = JSON.parse(currentSongLyrics)?.uri ?? null;
+            } catch {
+              appliedUri = null;
             }
+          }
+
+          if (appliedUri !== refetchUri) {
+            fetchLyrics(refetchUri).then(ApplyLyrics);
           }
         }, 1000);
       });
@@ -996,9 +1041,17 @@ async function main() {
         }
       });
 
+      // 15 minutes, jittered. The `finally` matters: CheckForUpdates reaches the
+      // network, and a single throw used to skip the reschedule entirely, which
+      // silently stopped update checks for the rest of the session.
       const CheckForUpdates_Intervaled = async () => {
-        await CheckForUpdates();
-        setTimeout(CheckForUpdates_Intervaled, 300 * 1000);
+        try {
+          await CheckForUpdates();
+        } catch (error) {
+          console.warn("Update check failed", error);
+        } finally {
+          setTimeout(CheckForUpdates_Intervaled, jitter(900 * 1000, 0.2));
+        }
       };
       setTimeout(async () => await CheckForUpdates_Intervaled(), 1000);
     }
@@ -1029,13 +1082,30 @@ async function main() {
 
   runThemeMatcher();
 
-  Spicetify.Keyboard.registerImportantShortcut(Spicetify.Keyboard.KEYS.ESCAPE, async () => {
-    if (IsPIP) return;
-    if (Fullscreen.CinemaViewOpen) {
-      await Fullscreen.Close();
-      Session.GoBack();
-    }
-  });
+  setTimeout(() => {
+    Spicetify.Keyboard.registerImportantShortcut(Spicetify.Keyboard.KEYS.ESCAPE, async () => {
+      if (IsPIP) return;
+      if (Fullscreen.CinemaViewOpen) {
+        await Fullscreen.Close();
+        Session.GoBack();
+      }
+    });
+
+    Spicetify.Keyboard.registerImportantShortcut(Spicetify.Keyboard.KEYS.F11, async () => {
+      if (IsPIP) return;
+      if (Fullscreen.IsOpen) {
+        if (!Fullscreen.CinemaViewOpen) {
+          Fullscreen.CinemaViewOpen = true;
+          await ExitFullscreenElement();
+          PageView.AppendViewControls(true);
+        } else {
+          Fullscreen.CinemaViewOpen = false;
+          await EnterSpicyLyricsFullscreen();
+          PageView.AppendViewControls(true);
+        }
+      }
+    });
+  }, 3000);
 
   document.addEventListener("fullscreenchange", async () => {
     if (!document.fullscreenElement && Fullscreen.IsOpen && !Fullscreen.CinemaViewOpen) {
@@ -1045,20 +1115,7 @@ async function main() {
     }
   });
 
-  Spicetify.Keyboard.registerImportantShortcut(Spicetify.Keyboard.KEYS.F11, async () => {
-    if (IsPIP) return;
-    if (Fullscreen.IsOpen) {
-      if (!Fullscreen.CinemaViewOpen) {
-        Fullscreen.CinemaViewOpen = true;
-        await ExitFullscreenElement();
-        PageView.AppendViewControls(true);
-      } else {
-        Fullscreen.CinemaViewOpen = false;
-        await EnterSpicyLyricsFullscreen();
-        PageView.AppendViewControls(true);
-      }
-    }
-  });
+  
 
   new Spicetify.Menu.Item(
 		"Spicy Lyrics Settings",

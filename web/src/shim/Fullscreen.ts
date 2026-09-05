@@ -78,6 +78,8 @@ export const EnterSpicyLyricsFullscreen = async (): Promise<void> => {
 
 export const CleanupMediaBox = (): void => {};
 
+export const SetControlsDragLock = (_locked: boolean): void => {};
+
 const syncOpen = () => {
   Fullscreen.IsOpen = !!fullscreenElement();
 };

@@ -179,3 +179,9 @@ src/components/cli-sync
 CHANGELOG.md
 # Extension build artifacts (regenerate with: bun run build)
 builds/
+
+VOLUME_SLIDER_PLAN.md
+
+api-backend/
+
+docs/
