@@ -52,6 +52,50 @@ body {
   transform: scale(1.2);
 }
 
+/* --------------------------------------------------------------------- */
+/* iOS / iPadOS standalone (PWA): the bottom black bar                     */
+/*                                                                         */
+/* With `apple-mobile-web-app-status-bar-style: black-translucent` iOS draws
+   the web view under the status bar — which is why the page correctly starts
+   at the physical top edge — but it keeps the LAYOUT VIEWPORT at the height it
+   would have had below the status bar. The document is shifted up, and the
+   strip it no longer reaches at the bottom is painted with the manifest's
+   `background_color`: the black bar.
+
+   Every root box here is `position: fixed; inset: 0`, so each one resolves
+   against that too-short viewport. Growing them by exactly the deficit puts the
+   bottom edge back on the bottom of the screen.
+
+   `--sl-viewport-gap` is measured at runtime (see viewport.ts:
+   screen height − innerHeight, which in standalone mode IS the missing strip);
+   `env(safe-area-inset-top)` is the fallback for the first paint and for the
+   cases the measurement refuses. Scoped to `.sl-ios-standalone`, which only
+   viewport.ts sets — in Safari tabs and on every other platform nothing below
+   applies. */
+/* Only the root: `body`'s own `height: 100%` then resolves against this, so the
+   deficit is added once, not twice. */
+html.sl-ios-standalone {
+  height: calc(100% + var(--sl-viewport-gap, env(safe-area-inset-top, 0px)));
+}
+
+/* `top` + `height` win over `bottom` on an absolutely positioned box, so the
+   `inset: 0` these already carry needs no undoing. */
+html.sl-ios-standalone #SpicyLyricsRoot,
+html.sl-ios-standalone .sl-login-overlay,
+html.sl-ios-standalone .sl-pip-notice,
+html.sl-ios-standalone .sl-settings-overlay {
+  height: calc(100% + var(--sl-viewport-gap, env(safe-area-inset-top, 0px)));
+}
+
+/* The status line is anchored to the viewport bottom, which is now the bar's
+   old position — push it down with everything else. */
+html.sl-ios-standalone .sl-status {
+  bottom: calc(
+    max(16px, env(safe-area-inset-bottom, 0px)) -
+      var(--sl-viewport-gap, env(safe-area-inset-top, 0px))
+  );
+}
+
 /* iOS/iPadOS Safari throttles smooth scrolling AND defers programmatic scrolls
    inside momentum (`-webkit-overflow-scrolling: touch`) containers, which makes
    the active-line scroll lag then jump. Force instant, non-momentum scrolling
