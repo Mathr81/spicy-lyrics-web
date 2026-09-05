@@ -185,3 +185,6 @@ VOLUME_SLIDER_PLAN.md
 api-backend/
 
 docs/
+
+# Standalone proxy host runtime state (session + lyric cache)
+web/server/.state/

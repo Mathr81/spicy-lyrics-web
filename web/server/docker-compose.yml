@@ -1,0 +1,64 @@
+# Spicy Lyrics proxy — run from this directory:
+#
+#   cp .env.example .env && $EDITOR .env
+#   docker compose up -d
+#   docker compose logs -f
+#
+# Change the published port by setting HOST_PORT in .env (or inline:
+# `HOST_PORT=9000 docker compose up -d`). Only the host side moves — the
+# container keeps listening on 8787, so the healthcheck and the image stay
+# unchanged whatever port you publish on.
+
+services:
+  proxy:
+    build:
+      # The Dockerfile's COPY paths are repo-relative, so the build context has
+      # to be the repository root, not this directory.
+      context: ../..
+      dockerfile: web/server/Dockerfile
+    image: spicy-lyrics-proxy
+    container_name: spicy-lyrics-proxy
+    restart: unless-stopped
+
+    ports:
+      - "${HOST_PORT:-8787}:8787"
+
+    environment:
+      # Your Spotify sp_dc cookie. Without it the API can only return unsynced
+      # text; the container logs a warning at startup rather than refusing to
+      # start, so check the logs if lyrics come back unsynced.
+      SP_DC: "${SP_DC:-}"
+
+      # Send the proxy's own outbound traffic through a SOCKS5/CONNECT proxy.
+      # Inside a container 127.0.0.1 is the container itself, so point at
+      # host.docker.internal — the extra_hosts entry below makes that resolve to
+      # your machine on Linux too:
+      #   PROXY_URL=socks5://host.docker.internal:1080
+      PROXY_URL: "${PROXY_URL:-}"
+
+      # debug | info | warn | error | silent
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+
+      # The rest are the same knobs as the Worker's wrangler [vars]; the
+      # defaults in worker.js apply when they are left empty.
+      CLIENT_VERSION: "${CLIENT_VERSION:-}"
+      LYRICS_CACHE_TTL: "${LYRICS_CACHE_TTL:-}"
+      LYRICS_MISS_CACHE_TTL: "${LYRICS_MISS_CACHE_TTL:-}"
+      CLIENT_PING_INTERVAL_MS: "${CLIENT_PING_INTERVAL_MS:-}"
+      CLIENT_SESSION_TTL_S: "${CLIENT_SESSION_TTL_S:-}"
+      SESSION_IDLE_MS: "${SESSION_IDLE_MS:-}"
+      API_ORIGIN: "${API_ORIGIN:-}"
+
+    volumes:
+      # The shared session and the 7-day lyric cache. Keeping this means a
+      # restart does not re-query the API for every song already played.
+      - state:/state
+
+    extra_hosts:
+      # Lets PROXY_URL=socks5://host.docker.internal:1080 reach a proxy running
+      # on the host. Already built in on Docker Desktop; this is what makes it
+      # work on Linux.
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  state:

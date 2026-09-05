@@ -263,7 +263,41 @@ SP_DC='<your sp_dc cookie>' node server.mjs      # listens on :8787
 npm test                                          # offline end-to-end tests
 ```
 
-Docker (from the repo root) or systemd:
+### Docker
+
+`docker-compose.yml` is the easy path — it sets the build context, the state
+volume and the host-gateway alias for you:
+
+```bash
+cd web/server
+cp .env.example .env      # put your SP_DC in it (.env is gitignored)
+docker compose up -d
+docker compose logs -f    # the first lines say the port, and where outbound traffic goes
+```
+
+**Changing the port:** set `HOST_PORT` in `.env`, or inline:
+
+```bash
+HOST_PORT=9000 docker compose up -d
+```
+
+Only the host side moves — the container keeps listening on 8787, so the
+healthcheck and the image are unaffected by whatever you publish on. Every other
+setting is an entry in `.env` too (`PROXY_URL`, `LOG_LEVEL`, the cache TTLs…).
+
+Useful afterwards:
+
+```bash
+docker compose ps                      # health: starting → healthy
+docker compose restart                 # keeps the cache and the shared session
+docker compose down                    # stop; the state volume survives
+docker compose down -v                 # stop and wipe the cache/session too
+docker compose up -d --build           # rebuild after pulling changes
+curl localhost:${HOST_PORT:-8787}/__spicy/stats
+```
+
+By hand instead, **from the repo root** (the Dockerfile's `COPY` paths are
+repo-relative, so the build context has to be the repository, not `web/server/`):
 
 ```bash
 docker build -f web/server/Dockerfile -t spicy-lyrics-proxy .
@@ -271,6 +305,8 @@ docker run -d --name spicy-lyrics-proxy -p 8787:8787 \
   -e SP_DC='<your sp_dc cookie>' -v spicy-proxy-state:/state \
   --restart unless-stopped spicy-lyrics-proxy
 ```
+
+### systemd
 
 `web/server/spicy-lyrics-proxy.service` is a hardened unit file; put `SP_DC` in a
 `systemctl edit` drop-in rather than in the unit itself.
