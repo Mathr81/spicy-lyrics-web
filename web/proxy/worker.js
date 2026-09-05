@@ -90,6 +90,10 @@ const OK = 200;
 const SESSION_DEAD = 403;
 const CREATE_BACKOFF_BASE_MS = 15000;
 const CREATE_BACKOFF_MAX_MS = 900000; // 15 min — a dead cookie must not be retried hot
+// Every upstream call waits on the minted token, so a token fetch that hangs
+// wedges the whole proxy. Bound it: falling back to "no token" degrades to
+// unsynced lyrics, which is far better than never answering.
+const MINT_TIMEOUT_MS = 8000;
 
 // --- config -----------------------------------------------------------------
 
@@ -103,6 +107,9 @@ function num(v, fallback) {
 function cfg(env) {
   const e = env || {};
   return {
+    // Overridable so the proxy can be pointed at a mirror — and so the host's
+    // end-to-end tests can run against a stub instead of the real API.
+    apiOrigin: (e.API_ORIGIN || API_ORIGIN).replace(/\/$/, ""),
     logLevel: LEVELS[String(e.LOG_LEVEL || "info").toLowerCase()] ?? LEVELS.info,
     clientVersion: e.CLIENT_VERSION || "6.3.12",
     lyricsCacheTtl: num(e.LYRICS_CACHE_TTL, 604800),
@@ -162,6 +169,41 @@ function classify(bodyBuffer) {
     return { type: "other" };
   } catch {
     return { type: "other" };
+  }
+}
+
+// A Cloudflare challenge/block page from the upstream zone, rather than an API
+// response. Worth naming explicitly: it is not a lyrics error, not a bad token
+// and not something a retry fixes — the request never reached the API. Detected
+// so it can be logged, reported by /__spicy/stats and shown to the user as what
+// it is instead of a generic failure.
+function blockedLyricsResult() {
+  const body = JSON.stringify({
+    error: "upstream-blocked",
+    queries: [
+      {
+        operationId: "0",
+        operation: "lyrics",
+        result: { httpStatus: 403, data: null },
+      },
+    ],
+  });
+  return {
+    status: 403,
+    contentType: "application/json",
+    buf: new TextEncoder().encode(body).buffer,
+    blocked: true,
+  };
+}
+
+function isUpstreamBlock(status, contentType, buf) {
+  if (status !== 403 && status !== 503 && status !== 429) return false;
+  if (!/text\/html/i.test(contentType || "")) return false;
+  try {
+    const head = new TextDecoder().decode(buf.slice(0, 4096));
+    return /Attention Required|cf-error|Cloudflare Ray ID|you have been blocked/i.test(head);
+  } catch {
+    return false;
   }
 }
 
@@ -283,6 +325,7 @@ async function getServerTime(env) {
   try {
     const res = await fetch("https://open.spotify.com/api/server-time", {
       headers: openSpotifyHeaders(env),
+      signal: AbortSignal.timeout(MINT_TIMEOUT_MS),
     });
     const json = await res.json();
     if (json && json.serverTime) return Number(json.serverTime);
@@ -301,7 +344,10 @@ async function getSecretDict(env) {
   }
   try {
     const url = (env && env.SECRET_DICT_URL) || SECRET_DICT_URL;
-    const res = await fetch(url, { headers: { Accept: "application/json" } });
+    const res = await fetch(url, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(MINT_TIMEOUT_MS),
+    });
     if (res.ok) {
       const dict = await res.json();
       if (dict && typeof dict === "object" && Object.keys(dict).length) {
@@ -336,7 +382,10 @@ async function mintToken(env) {
         `https://open.spotify.com/api/token?reason=${reason}&productType=web-player` +
         `&totp=${code}&totpServer=${code}&totpVer=${ver}`;
       try {
-        const res = await fetch(url, { headers: openSpotifyHeaders(env) });
+        const res = await fetch(url, {
+          headers: openSpotifyHeaders(env),
+          signal: AbortSignal.timeout(MINT_TIMEOUT_MS),
+        });
         if (!res.ok) continue;
         const json = await res.json().catch(() => null);
         if (json && json.accessToken && !json.isAnonymous) {
@@ -405,7 +454,9 @@ export class SpicySession {
           lyricsUpstream: 0,
           lyricsCoalesced: 0,
           clientOps: 0,
+          blocked: 0,
         },
+        lastBlockAt: 0,
       };
     });
   }
@@ -425,6 +476,21 @@ export class SpicySession {
     if (typeof this.state.waitUntil === "function") this.state.waitUntil(p);
   }
 
+  // Loud, and at warn level: an operator staring at "lyrics don't load" needs
+  // this to be the first thing they see in the logs.
+  noteBlock(op, http) {
+    this.s.stats.blocked++;
+    this.s.lastBlockAt = Date.now();
+    this.log("warn", "upstream_blocked", {
+      op,
+      http,
+      detail:
+        "api.spicylyrics.org returned a Cloudflare block page — the request " +
+        "never reached the API. This is an upstream network/WAF decision, not " +
+        "a token or session problem.",
+    });
+  }
+
   keepAliveMs() {
     return Math.max(this.s.config.pingIntervalMs, this.s.config.minPingIntervalMs);
   }
@@ -441,7 +507,7 @@ export class SpicySession {
     const token = await getWebPlayerToken(this.env);
     const started = Date.now();
     try {
-      const res = await fetch(`${API_ORIGIN}/query`, {
+      const res = await fetch(`${cfg(this.env).apiOrigin}/query`, {
         method: "POST",
         headers: upstreamHeaders(this.env, token, withAuthorization),
         body: JSON.stringify({
@@ -449,17 +515,31 @@ export class SpicySession {
           client: { version: cfg(this.env).clientVersion },
         }),
       });
-      const json = res.ok ? await res.json().catch(() => null) : null;
-      const result =
-        json?.queries?.find((q) => q.operationId === "0")?.result ?? json?.queries?.[0]?.result;
-      this.log("info", "upstream", {
-        op: tag,
-        http: res.status,
-        inner: result?.httpStatus ?? null,
-        ms: Date.now() - started,
-      });
+      const raw = await res.arrayBuffer();
+      const blocked = isUpstreamBlock(res.status, res.headers.get("Content-Type"), raw);
+      if (blocked) this.noteBlock(tag, res.status);
+      let result = null;
+      if (res.ok && !blocked) {
+        try {
+          const json = JSON.parse(new TextDecoder().decode(raw));
+          result =
+            json?.queries?.find((q) => q.operationId === "0")?.result ??
+            json?.queries?.[0]?.result ??
+            null;
+        } catch {
+          result = null;
+        }
+      }
+      if (!blocked) {
+        this.log("info", "upstream", {
+          op: tag,
+          http: res.status,
+          inner: result?.httpStatus ?? null,
+          ms: Date.now() - started,
+        });
+      }
       this.s.lastUpstreamAt = Date.now();
-      return result ?? null;
+      return result;
     } catch (err) {
       this.log("warn", "upstream_failed", { op: tag, error: String(err) });
       return null;
@@ -613,12 +693,23 @@ export class SpicySession {
     const token = await getWebPlayerToken(this.env);
     const started = Date.now();
     try {
-      const res = await fetch(`${API_ORIGIN}/query`, {
+      const res = await fetch(`${cfg(this.env).apiOrigin}/query`, {
         method: "POST",
         headers: upstreamHeaders(this.env, token, false),
         body: bodyText,
       });
       const buf = await res.arrayBuffer();
+      const contentType = res.headers.get("Content-Type") || "application/json";
+      this.s.lastUpstreamAt = Date.now();
+
+      if (isUpstreamBlock(res.status, contentType, buf)) {
+        this.noteBlock("lyrics", res.status);
+        // Never hand a Cloudflare HTML page to the page's JSON parser, and never
+        // cache it (only inner-200/404 are cached). Return something the client
+        // can name.
+        return blockedLyricsResult();
+      }
+
       this.log("info", "upstream", {
         op: "lyrics",
         id,
@@ -627,12 +718,7 @@ export class SpicySession {
         bytes: buf.byteLength,
         ms: Date.now() - started,
       });
-      this.s.lastUpstreamAt = Date.now();
-      return {
-        status: res.status,
-        contentType: res.headers.get("Content-Type") || "application/json",
-        buf,
-      };
+      return { status: res.status, contentType, buf };
     } catch (err) {
       this.log("warn", "upstream_failed", { op: "lyrics", id, error: String(err) });
       return {
@@ -655,10 +741,10 @@ export class SpicySession {
     if (url.pathname === "/lyrics") {
       const id = request.headers.get("x-slp-id") || "";
       const r = await this.lyrics(id, await request.text());
-      return new Response(r.buf, {
-        status: r.status,
-        headers: { "Content-Type": r.contentType },
-      });
+      const h = { "Content-Type": r.contentType };
+      // The flag has to travel as a header: only the body crosses this boundary.
+      if (r.blocked) h["X-Spicy-Upstream"] = "blocked";
+      return new Response(r.buf, { status: r.status, headers: h });
     }
 
     if (url.pathname === "/stats") {
@@ -669,6 +755,15 @@ export class SpicySession {
         upstreamKeepAliveEverySeconds: Math.round(this.keepAliveMs() / 1000),
         lastUpstreamAt: this.s.lastUpstreamAt || null,
         lastClientAt: this.s.lastClientAt || null,
+        upstreamBlocked: this.s.stats.blocked
+          ? {
+              count: this.s.stats.blocked,
+              lastAt: this.s.lastBlockAt,
+              detail:
+                "api.spicylyrics.org is returning a Cloudflare block page to " +
+                "this Worker. The requests are not reaching the API.",
+            }
+          : null,
         upstreamConfig: this.s.config,
         stats: this.s.stats,
       });
@@ -705,24 +800,50 @@ const memHub = {
     lyricsUpstream: 0,
     lyricsCoalesced: 0,
     clientOps: 0,
+    blocked: 0,
   },
+  lastBlockAt: 0,
 };
+
+function memNoteBlock(env, op, http) {
+  memHub.stats.blocked++;
+  memHub.lastBlockAt = Date.now();
+  makeLog(env, "hub-mem")("warn", "upstream_blocked", {
+    op,
+    http,
+    detail: "api.spicylyrics.org returned a Cloudflare block page — the request never reached the API.",
+  });
+}
 
 async function memUpstream(env, queries, withAuthorization, tag) {
   const log = makeLog(env, "hub-mem");
   const token = await getWebPlayerToken(env);
   try {
-    const res = await fetch(`${API_ORIGIN}/query`, {
+    const res = await fetch(`${cfg(env).apiOrigin}/query`, {
       method: "POST",
       headers: upstreamHeaders(env, token, withAuthorization),
       body: JSON.stringify({ queries, client: { version: cfg(env).clientVersion } }),
     });
-    const json = res.ok ? await res.json().catch(() => null) : null;
+    const raw = await res.arrayBuffer();
     memHub.lastUpstreamAt = Date.now();
-    const result =
-      json?.queries?.find((q) => q.operationId === "0")?.result ?? json?.queries?.[0]?.result;
+    if (isUpstreamBlock(res.status, res.headers.get("Content-Type"), raw)) {
+      memNoteBlock(env, tag, res.status);
+      return null;
+    }
+    let result = null;
+    if (res.ok) {
+      try {
+        const json = JSON.parse(new TextDecoder().decode(raw));
+        result =
+          json?.queries?.find((q) => q.operationId === "0")?.result ??
+          json?.queries?.[0]?.result ??
+          null;
+      } catch {
+        result = null;
+      }
+    }
     log("info", "upstream", { op: tag, http: res.status, inner: result?.httpStatus ?? null });
-    return result ?? null;
+    return result;
   } catch (err) {
     log("warn", "upstream_failed", { op: tag, error: String(err) });
     return null;
@@ -773,17 +894,19 @@ async function memLyrics(env, id, bodyText) {
   memHub.stats.lyricsUpstream++;
   p = (async () => {
     const token = await getWebPlayerToken(env);
-    const res = await fetch(`${API_ORIGIN}/query`, {
+    const res = await fetch(`${cfg(env).apiOrigin}/query`, {
       method: "POST",
       headers: upstreamHeaders(env, token, false),
       body: bodyText,
     });
     memHub.lastUpstreamAt = Date.now();
-    return {
-      status: res.status,
-      contentType: res.headers.get("Content-Type") || "application/json",
-      buf: await res.arrayBuffer(),
-    };
+    const contentType = res.headers.get("Content-Type") || "application/json";
+    const buf = await res.arrayBuffer();
+    if (isUpstreamBlock(res.status, contentType, buf)) {
+      memNoteBlock(env, "lyrics", res.status);
+      return blockedLyricsResult();
+    }
+    return { status: res.status, contentType, buf };
   })().finally(() => memHub.inflight.delete(id));
   memHub.inflight.set(id, p);
   return p;
@@ -811,7 +934,9 @@ function hub(env) {
     },
     lyrics: async (id, bodyText) => {
       const r = await memLyrics(env, id, bodyText);
-      return new Response(r.buf, { status: r.status, headers: { "Content-Type": r.contentType } });
+      const h = { "Content-Type": r.contentType };
+      if (r.blocked) h["X-Spicy-Upstream"] = "blocked";
+      return new Response(r.buf, { status: r.status, headers: h });
     },
     stats: async () =>
       Response.json({
@@ -819,6 +944,9 @@ function hub(env) {
         sessionOpen: !!memHub.tk,
         sessionAgeSeconds: memHub.createdAt ? Math.round((Date.now() - memHub.createdAt) / 1000) : 0,
         lastUpstreamAt: memHub.lastUpstreamAt || null,
+        upstreamBlocked: memHub.stats.blocked
+          ? { count: memHub.stats.blocked, lastAt: memHub.lastBlockAt }
+          : null,
         upstreamConfig: memHub.config,
         stats: memHub.stats,
       }),
@@ -917,6 +1045,7 @@ export default {
           return {
             status: res.status,
             contentType: res.headers.get("Content-Type") || "application/json",
+            blocked: res.headers.get("X-Spicy-Upstream") === "blocked",
             buf: await res.arrayBuffer(),
           };
         })().finally(() => edgeInflight.delete(kind.id));
@@ -955,14 +1084,15 @@ export default {
         ttl,
       });
 
-      return new Response(r.buf, {
-        status: r.status,
-        headers: {
-          "Content-Type": r.contentType,
-          "X-Spicy-Cache": coalesced ? "coalesced" : "miss",
-          ...cors,
-        },
-      });
+      const outHeaders = {
+        "Content-Type": r.contentType,
+        "X-Spicy-Cache": coalesced ? "coalesced" : "miss",
+        ...cors,
+      };
+      // Lets the page say "the API blocked this proxy" instead of "an error
+      // occurred" — the two need very different reactions from the operator.
+      if (r.blocked) outHeaders["X-Spicy-Upstream"] = "blocked";
+      return new Response(r.buf, { status: r.status, headers: outHeaders });
     }
 
     // --- Everything else: plain passthrough with the shared identity. --------
@@ -974,7 +1104,7 @@ export default {
     }
     headers.set("X-mode", request.headers.get("X-mode") || "2");
 
-    const upstream = await fetch(API_ORIGIN + inUrl.pathname + inUrl.search, {
+    const upstream = await fetch(c.apiOrigin + inUrl.pathname + inUrl.search, {
       method: request.method,
       headers,
       body,

@@ -55,6 +55,9 @@ const NOTICES: Record<string, string> = {
   queued: "Votre requête est dans la file d'attente — les paroles arrivent…",
   error: "Une erreur est survenue lors du chargement des paroles.",
   "no-auth": "Connexion Spotify requise.",
+  blocked:
+    "L'API Spicy Lyrics refuse les requêtes du proxy (blocage réseau en amont). " +
+    "Voir /__spicy/stats sur le Worker.",
 };
 
 let currentTrackUri: string | null = null;

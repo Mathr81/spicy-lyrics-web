@@ -206,6 +206,126 @@ the client ping interval, the idle timeout, `LOG_LEVEL`, `CLIENT_VERSION`) — n
 code change to adjust any of it. `npm test` inside `web/proxy/` runs an offline
 smoke test that asserts the "4 devices → 1 request" behaviour.
 
+### If the API blocks the proxy
+
+`api.spicylyrics.org` sits behind Cloudflare and its WAF can refuse traffic
+outright — including, as of this writing, requests coming from Cloudflare
+Workers. The symptom is a Cloudflare "Sorry, you have been blocked" HTML page
+where an API response should be, for *every* operation, so nothing loads and the
+shared session never opens.
+
+The proxy names this rather than letting it look like a lyrics error:
+
+- `/__spicy/stats` reports `upstreamBlocked: { count, lastAt }` and
+  `sessionOpen: false`.
+- The logs carry `evt="upstream_blocked"` at `warn` level.
+- The page shows "L'API Spicy Lyrics refuse les requêtes du proxy" instead of a
+  generic failure, and the block page is never cached or handed to the JSON
+  parser.
+
+To confirm it is the network path and not your setup, send the same request from
+an ordinary machine — if that returns 200 and the Worker gets 403, the request
+shape is fine and the hosting location is what is being refused:
+
+```bash
+curl -s -X POST https://api.spicylyrics.org/query \
+  -H 'Content-Type: application/json' \
+  -H 'Origin: https://xpui.app.spotify.com' \
+  -H 'Referer: https://xpui.app.spotify.com/' \
+  -H 'SpicyLyrics-Version: 6.3.12' -H 'X-mode: 2' \
+  -d '{"queries":[{"operationId":"0","operation":"pingConfig","variables":{}}]}'
+```
+
+`/__spicy/tokencheck` returning `ok` at the same time confirms the `SP_DC`
+cookie is not the problem.
+
+The API's own response carries this notice: *"Access is granted solely for
+personal, individual use through official Spicy Lyrics clients or their public
+forks of official repositories."* Personal use through a fork is what this build
+is; the sensible fixes are to run the proxy from an ordinary machine (see below)
+or to ask the Spicy Lyrics maintainers. Do not try to defeat the block by
+rotating addresses or disguising the client.
+
+## Running the proxy outside Cloudflare (`web/server/`)
+
+`web/server/server.mjs` runs **the same `web/proxy/worker.js`**, unmodified, on
+plain Node — on a VPS, a home server or in a container. It is not a second
+implementation: Node 20 already provides `fetch`/`Request`/`Response`/
+`crypto.subtle`, so the host only supplies the two things Workers adds — a
+`caches.default` (memory + disk, so the 7-day lyric cache survives a restart) and
+a Durable Object runtime (one process is one instance, with storage in a JSON
+file and the keep-alive alarm on a timer). The shared session, the coalescing and
+the TOTP token minting therefore cannot drift between the two hosts.
+
+```bash
+cd web/server
+SP_DC='<your sp_dc cookie>' node server.mjs      # listens on :8787
+npm test                                          # offline end-to-end tests
+```
+
+Docker (from the repo root) or systemd:
+
+```bash
+docker build -f web/server/Dockerfile -t spicy-lyrics-proxy .
+docker run -d --name spicy-lyrics-proxy -p 8787:8787 \
+  -e SP_DC='<your sp_dc cookie>' -v spicy-proxy-state:/state \
+  --restart unless-stopped spicy-lyrics-proxy
+```
+
+`web/server/spicy-lyrics-proxy.service` is a hardened unit file; put `SP_DC` in a
+`systemctl edit` drop-in rather than in the unit itself.
+
+Configuration is the same names as the Worker's `[vars]`, read from the
+environment: `SP_DC`, `PORT` (8787), `STATE_DIR` (`./.state`), `LOG_LEVEL`,
+`CLIENT_VERSION`, `LYRICS_CACHE_TTL`, `LYRICS_MISS_CACHE_TTL`,
+`CLIENT_PING_INTERVAL_MS`, `CLIENT_SESSION_TTL_S`, `SESSION_IDLE_MS`, and
+`API_ORIGIN` if you ever need to point it at a mirror.
+
+### Sending the proxy's own traffic through another proxy
+
+`PROXY_URL` routes everything this process sends — the lyrics API *and*
+Spotify's token endpoints — through a SOCKS5 or HTTP CONNECT proxy:
+
+```bash
+PROXY_URL=socks5://127.0.0.1:1080 SP_DC='…' node server.mjs
+PROXY_URL=socks5://user:pass@127.0.0.1:1080 …     # with credentials
+PROXY_URL=http://127.0.0.1:3128 …                 # an HTTP CONNECT proxy
+PROXY_URL=127.0.0.1:1080 …                        # bare host:port means socks5
+```
+
+`socks5://` and `socks5h://` behave identically: the hostname is always resolved
+*by the proxy*, never locally, which is the only sensible behaviour for a tunnel
+meant to change your exit path. `ALL_PROXY` works too.
+
+> `HTTPS_PROXY` / `HTTP_PROXY` are deliberately **not** picked up. They are
+> commonly set on a machine for unrelated reasons, and inheriting them silently
+> would reroute this process's traffic — Spotify tokens included — somewhere you
+> never chose. If that is what you want, say it: `PROXY_URL="$HTTPS_PROXY"`.
+
+The startup log always states where outbound traffic goes, and a proxy that
+cannot be reached fails the request rather than quietly falling back to a direct
+connection.
+
+In Docker, `127.0.0.1` is the *container*, not your host. Use `--network host`,
+or `--add-host=host.docker.internal:host-gateway` with
+`PROXY_URL=socks5://host.docker.internal:1080`.
+
+No dependency was added for this: `web/server/outbound.mjs` implements the
+SOCKS5 (RFC 1928/1929) and CONNECT handshakes and hands the resulting socket to
+Node's own HTTP client, so only the two handshakes are hand-written — everything
+above them, TLS included, is Node's.
+
+Then set `VITE_LYRICS_API` to the host's URL and rebuild the page.
+
+> **Serve it over HTTPS.** If the page is on HTTPS (GitHub Pages) and the proxy
+> is on plain `http://`, the browser blocks the request as mixed content and
+> nothing loads. Put [Caddy](https://caddyserver.com/) (automatic certificates)
+> or a Cloudflare Tunnel in front. A tunnel is a good fit for a home server with
+> no public address — it only handles traffic *in*; requests to the lyrics API
+> still leave from your own connection, which is the point of moving off Workers.
+> The Screen Wake Lock also needs a secure context, so HTTPS is required for the
+> iPad to stay awake.
+
 ## Synced lyrics (the `SP_DC` secret)
 
 Spotify's **synced** (word/line-timed) lyrics come from an internal endpoint that

@@ -9,7 +9,11 @@ const packer = new SLObjPack();
 
 export type LyricsResult =
   | { ok: true; data: any }
-  | { ok: false; reason: "not-found" | "queued" | "error" | "no-auth"; status: number };
+  | {
+      ok: false;
+      reason: "not-found" | "queued" | "error" | "no-auth" | "blocked";
+      status: number;
+    };
 
 const cache = new Map<string, any>();
 
@@ -88,6 +92,12 @@ export async function fetchLyrics(trackId: string): Promise<LyricsResult> {
     return { ok: false, reason: "error", status: 0 };
   }
 
+  // The bundled Worker proxy sets this when api.spicylyrics.org answered with a
+  // Cloudflare block page instead of an API response: the request never reached
+  // the API, so it is neither a missing-lyrics case nor anything a retry fixes.
+  if (res.headers.get("X-Spicy-Upstream") === "blocked") {
+    return { ok: false, reason: "blocked", status: res.status };
+  }
   if (!res.ok) return { ok: false, reason: "error", status: res.status };
 
   const json = await res.json();
