@@ -86,6 +86,34 @@ Then push to `main` (or run the workflow manually) and it deploys itself.
 Append `?demo` to the URL to preview the animated lyrics with a built-in sample —
 no Spotify login required. Handy for checking your deployment.
 
+## Installing on iPad / iPhone (PWA)
+
+Safari → Share → **Add to Home Screen**. The installed app runs edge-to-edge:
+`apple-mobile-web-app-status-bar-style: black-translucent` plus
+`viewport-fit=cover` put the lyrics under the status bar instead of below it.
+
+That combination has a well-known iOS side effect: the web view is drawn from the
+physical top of the screen, but the *layout viewport* keeps the height it would
+have had underneath the status bar. The document ends up shifted up, and the
+strip it no longer covers at the bottom shows the manifest `background_color` —
+the black bar. `web/src/viewport.ts` measures that deficit at runtime
+(`screen height − innerHeight`, which in standalone mode is exactly the missing
+strip) and `styles.css` grows the fixed page host by it, so the page reaches the
+real bottom edge again. Scoped to installed iOS/iPadOS apps; nothing changes in a
+Safari tab or on any other platform.
+
+### Keeping the screen on
+
+The page holds a **Screen Wake Lock** while something is playing, so the iPad
+doesn't dim and lock mid-song — it has no `<video>` of its own, and in Connect
+mirror mode the audio is coming out of a different device entirely, so iOS would
+otherwise treat it as an idle tab.
+
+The lock is re-acquired on `visibilitychange` (the system drops it whenever the
+document is hidden and never restores it), and released as soon as playback
+pauses. Settings → **Garder l'écran allumé** turns it off; the row only appears
+where the API exists (Safari 16.4+ / iOS 16.4+, current Chromium).
+
 ## API access — CORS & required headers (the proxy)
 
 The lyrics API is built for the Spotify desktop client and expects request
@@ -118,7 +146,7 @@ Worker, which forwards them to `api.spicylyrics.org` with:
 - `Origin: https://xpui.app.spotify.com`
 - `Referer: https://xpui.app.spotify.com/`
 - a Spotify-client `User-Agent`
-- `SpicyLyrics-Version: 6.2.3`
+- `SpicyLyrics-Version` (the `CLIENT_VERSION` var, `6.3.12` by default)
 
 and passes your `SpicyLyrics-WebAuth` Bearer token straight through (never logged
 or stored). Any equivalent serverless function (Vercel/Netlify) works too — just
@@ -126,6 +154,57 @@ mirror `web/proxy/worker.js`.
 
 > If `api.spicylyrics.org` happens to allow your origin directly, you can skip the
 > proxy and leave `VITE_LYRICS_API` unset — but the proxy is the reliable path.
+
+### One client, however many devices
+
+The API's session model expects each client to open a session and keep it alive.
+Left alone, every browser does that for itself: four devices means four sessions,
+four ping loops and four identical lyric lookups for the same song — the exact
+traffic shape that gets a client rate-limited.
+
+The Worker collapses all of it into one upstream identity:
+
+| From the browsers | Reaches `api.spicylyrics.org` |
+|---|---|
+| `createSession` / `refreshSession` / `ping` / `pingConfig`, per device | nothing — answered by the Worker, which owns **one** shared session |
+| the shared session's keep-alive | one ping loop, on the API's own schedule, regardless of device count |
+| 4 devices starting the same song at once | **1** lyric request (in-flight coalescing) |
+| that song, ever again | **0** — served from the edge cache for 7 days |
+| nobody listening for 30 min | **0** — the shared session is dropped, not pinged forever |
+
+The shared session lives in a Durable Object, so "one" holds across colos and
+isolates rather than per-isolate. Without a Durable Object binding (a
+paste-into-the-dashboard deploy) the Worker falls back to per-isolate sharing on
+its own — same behaviour, weaker guarantee.
+
+Browsers still run their own session loop, but through the proxy it is local and
+free: the Worker answers with a proxy-local token and a 15-minute ping interval,
+and the page parks that timer entirely while it's in the background.
+
+Check what is actually going out:
+
+```
+GET https://<your-worker>.workers.dev/__spicy/stats
+{
+  "mode": "durable-object",
+  "sessionOpen": true,
+  "stats": { "clientOps": 47, "createSession": 1, "ping": 3, "lyricsUpstream": 6, ... }
+}
+```
+
+`clientOps` is what the devices asked for; `ping` + `lyricsUpstream` is what was
+forwarded. The gap is the point.
+
+Logs are on (`[observability]` in `wrangler.toml`) — dashboard → Workers →
+`spicy-lyrics-proxy` → Logs, or `npm run tail`. Filter on `evt`: `upstream` (a
+call that really left), `cache` (`hit` / `coalesced` / `miss`),
+`session_op_local`, `session_opened` / `session_dropped`. Set `LOG_LEVEL` to
+`debug` in `wrangler.toml` to also see cache hits and per-device session ops.
+
+Everything tunable lives in `[vars]` in `web/proxy/wrangler.toml` (cache TTLs,
+the client ping interval, the idle timeout, `LOG_LEVEL`, `CLIENT_VERSION`) — no
+code change to adjust any of it. `npm test` inside `web/proxy/` runs an offline
+smoke test that asserts the "4 devices → 1 request" behaviour.
 
 ## Synced lyrics (the `SP_DC` secret)
 

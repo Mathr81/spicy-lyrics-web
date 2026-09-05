@@ -7,6 +7,11 @@ import {
   $minimalLyricsMode,
   $skipSpicyFont,
 } from "@src/utils/stores.ts";
+import {
+  isWakeLockEnabled,
+  setWakeLockEnabled,
+  wakeLockSupported,
+} from "./wakelock.ts";
 
 export interface SettingsCallbacks {
   getPage: () => HTMLElement | null;
@@ -62,6 +67,17 @@ export function setupSettings(cb: SettingsCallbacks): SettingsHandle {
       },
     },
   ];
+
+  // Only offered where the Screen Wake Lock API exists (Safari 16.4+, current
+  // Chromium); elsewhere the row would be a switch that does nothing.
+  if (wakeLockSupported()) {
+    toggles.push({
+      label: "Garder l'écran allumé",
+      desc: "Empêche la mise en veille pendant la lecture.",
+      get: isWakeLockEnabled,
+      set: setWakeLockEnabled,
+    });
+  }
 
   // Reflect persisted state on load.
   cb.getPage()?.classList.toggle("SimpleLyricsMode", $simpleLyricsMode.get());

@@ -1,6 +1,111 @@
+# Cloudflare Worker config for the Spicy Lyrics proxy.
+#
+# Deploy with:  cd web/proxy && npx wrangler deploy
+# Then set VITE_LYRICS_API to the printed https://spicy-lyrics-proxy.<subdomain>.workers.dev URL.
+#
+# Required secret (never a var — it's your Spotify cookie):
+#   npx wrangler secret put SP_DC
+
 name = "spicy-lyrics-proxy"
 main = "worker.js"
-compatibility_date = "2024-11-01"
 
-# Deploy with:  npx wrangler deploy
-# Then set VITE_LYRICS_API to the printed https://spicy-lyrics-proxy.<subdomain>.workers.dev URL.
+# Must be >= 2024-09-23 for Durable Objects with the SQLite storage backend
+# (used by the shared-session object below, and free on the Workers Free plan).
+compatibility_date = "2025-09-01"
+
+# ---------------------------------------------------------------------------
+# Logs
+#
+# Without this block the Worker's console output is thrown away and `wrangler
+# tail` is the only way to see anything — and only while you're watching. With
+# it, every `log(...)` call in worker.js lands in Workers Logs (dashboard →
+# Workers → spicy-lyrics-proxy → Logs) and is queryable by field.
+#
+# The fields worth filtering on:
+#   evt="upstream"      a request that actually reached api.spicylyrics.org
+#   evt="cache"         a lyric lookup: state=hit | coalesced | miss
+#   evt="session_op_local"  a client session op answered without going upstream
+#   evt="session_opened" / "session_dropped"  shared-session lifecycle
+#
+# head_sampling_rate = 1 keeps 100% of invocations. This Worker sees a handful
+# of requests per minute at most, so there is nothing to sample away; drop it to
+# 0.1 only if you ever put it in front of real traffic.
+# ---------------------------------------------------------------------------
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+# Per-request summary lines (method, status, duration) on top of our own logs.
+invocation_logs = true
+
+# ---------------------------------------------------------------------------
+# Placement
+#
+# Default placement runs the Worker wherever the *client* is: four devices in
+# two locations = two isolates = two caches. Smart Placement runs it close to
+# api.spicylyrics.org instead, which both cuts the round-trip on a cache miss
+# and funnels every device through the same location — so the edge cache and the
+# in-isolate request coalescing actually see each other's traffic.
+# ---------------------------------------------------------------------------
+[placement]
+mode = "smart"
+
+# ---------------------------------------------------------------------------
+# Shared session (Durable Object)
+#
+# One global instance owns the single upstream Spicy Lyrics session and every
+# upstream lyric fetch, so N connected devices are one client from the API's
+# point of view. It keeps the session alive on its own alarm rather than on
+# client pings, and lets it lapse after SESSION_IDLE_MS with nobody listening.
+#
+# Free plan: fine — DOs backed by SQLite (`new_sqlite_classes`) are included.
+# If you'd rather not use Durable Objects, delete both blocks below; worker.js
+# falls back to per-isolate sharing on its own (weaker guarantee, same API).
+# ---------------------------------------------------------------------------
+[[durable_objects.bindings]]
+name = "SESSION"
+class_name = "SpicySession"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SpicySession"]
+
+# ---------------------------------------------------------------------------
+# Tunables
+#
+# Plain vars, so `npx wrangler deploy` (or the dashboard) can change any of them
+# without touching code. Wrangler passes them as strings; worker.js coerces.
+# ---------------------------------------------------------------------------
+[vars]
+# debug | info | warn | error | silent. "debug" adds cache hits and per-client
+# session ops — useful when you're checking that devices really are collapsing.
+LOG_LEVEL = "info"
+
+# Sent upstream as `SpicyLyrics-Version`. Keep in sync with CLIENT_VERSION in
+# web/src/config.ts — a stale version is one of the things the API notices.
+CLIENT_VERSION = "6.3.12"
+
+# Edge cache for a track whose lyrics were found. Lyrics don't change, so this
+# is the single biggest lever on upstream traffic: 7 days.
+LYRICS_CACHE_TTL = "604800"
+
+# Edge cache for a definite "this track has no lyrics" — short, in case the
+# database gains them later.
+LYRICS_MISS_CACHE_TTL = "3600"
+
+# How often a *browser* should ping its (proxy-local) session. These pings never
+# leave the Worker, so there is no reason for four devices to wake up every five
+# minutes: 15 min. The real upstream keep-alive follows the API's own schedule.
+CLIENT_PING_INTERVAL_MS = "900000"
+
+# TTL advertised to browsers for their proxy-local session (24 h), so they stop
+# re-negotiating one every hour.
+CLIENT_SESSION_TTL_S = "86400"
+
+# Drop the shared upstream session after this long with no device asking for
+# anything (30 min) — an idle deployment should send zero traffic, not a ping
+# every five minutes forever.
+SESSION_IDLE_MS = "1800000"

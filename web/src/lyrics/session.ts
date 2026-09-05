@@ -13,6 +13,13 @@
 // `Authorization` header, which a browser can't set — the bundled Worker proxy
 // injects it (see web/proxy/worker.js), so this only establishes a real session
 // when LYRICS_API points at that proxy. Without it the calls fail harmlessly.
+//
+// Through the proxy these ops never reach the API: the Worker owns ONE upstream
+// session shared by every connected device and answers `createSession`/`ping`/
+// `refreshSession` itself, handing back a proxy-local token and a much longer
+// ping interval via `pingConfig`. This loop therefore costs nothing upstream —
+// but it still shouldn't run while nobody is looking, so the timers are parked
+// whenever the page is hidden and caught up when it comes back.
 import { LYRICS_API, CLIENT_VERSION } from "../config.ts";
 import { getAccessToken } from "../spotify/auth.ts";
 
@@ -46,6 +53,9 @@ let started = false;
 let pingTimer: ReturnType<typeof setTimeout> | null = null;
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 let createBackoff = BACKOFF_BASE_MS;
+// Set when a ping fell due while the tab was hidden, so we fire once on return
+// instead of letting a backgrounded device keep a timer running.
+let pingDueWhileHidden = false;
 
 async function query(
   queries: Array<{ operation: string; variables?: any }>,
@@ -113,6 +123,13 @@ function scheduleTimers(): void {
 
 async function pingTick(): Promise<void> {
   if (!tk) return;
+  if (document.hidden) {
+    // Nothing to keep alive for a screen nobody is looking at — resume on
+    // `visibilitychange` rather than burning a request every interval.
+    pingDueWhileHidden = true;
+    pingTimer = null;
+    return;
+  }
   const r = await query([{ operation: "ping", variables: { tk } }]);
   if (r?.httpStatus === STATUS.SESSION_DEAD) {
     recover();
@@ -170,5 +187,10 @@ async function createLoop(): Promise<void> {
 export function initSession(): void {
   if (started) return;
   started = true;
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden || !tk || !pingDueWhileHidden) return;
+    pingDueWhileHidden = false;
+    void pingTick();
+  });
   void createLoop();
 }

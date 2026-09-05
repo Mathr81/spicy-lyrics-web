@@ -43,6 +43,8 @@ import { setupMediaBoxControls, type MediaBoxHandle } from "./mediabox.ts";
 import { togglePip, pipSupported } from "./pip.ts";
 import { toggleVideoPip, setPipLyrics } from "./mobilepip.ts";
 import { renderShell, type ShellHandle } from "./ui.ts";
+import { initViewport } from "./viewport.ts";
+import { initWakeLock, setPlaying as setWakeLockPlaying } from "./wakelock.ts";
 import { setupSettings, type SettingsHandle } from "./settings.ts";
 import { $romanization } from "@src/utils/uiState.ts";
 import LoadFonts, { ApplyFontPixel } from "@src/components/Styling/Fonts.ts";
@@ -64,6 +66,12 @@ let settings: SettingsHandle;
 const lastLyricsInfo = { type: "—", source: "—", lines: 0, translit: false };
 
 async function main(): Promise<void> {
+  // Correct the iOS/iPadOS standalone viewport before anything is laid out,
+  // otherwise the first paint shows the black bar this fixes.
+  initViewport();
+  // Keep the iPad awake while lyrics are playing (Screen Wake Lock).
+  initWakeLock();
+
   const root = document.getElementById("SpicyLyricsRoot") as HTMLElement;
   const page = buildPage(root);
 
@@ -161,6 +169,7 @@ async function main(): Promise<void> {
 
 function handleSnapshot(snap: AdapterSnapshot): void {
   updateNowBar(snap.track);
+  setWakeLockPlaying(snap.isPlaying);
 
   const hasTrack = !!snap.track;
   if (hasTrack !== hadTrack) {

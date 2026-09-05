@@ -1,6 +1,7 @@
-// Cloudflare Worker — CORS + header/token proxy for the Spicy Lyrics API.
+// Cloudflare Worker — CORS + header/token proxy AND shared-identity front end
+// for the Spicy Lyrics API.
 //
-// Two jobs:
+// Four jobs:
 //
 // 1. Inject the request headers a browser can't set (Origin/Referer/User-Agent)
 //    and add permissive CORS, so the page can reach the API at all.
@@ -11,6 +12,22 @@
 //    Spotify account cookie), the Worker mints a web-player token server-side and
 //    uses it as the lyrics bearer. The cookie never reaches the browser and is
 //    never logged.
+//
+// 3. **One identity, N devices.** The API's session model expects a client to
+//    open a session and keep it alive. Every browser doing that on its own means
+//    4 devices = 4 sessions, 4 ping loops and 4 identical lyric lookups — which
+//    is exactly the traffic pattern that gets a client rate-limited or flagged.
+//    So session lifecycle ops (`createSession` / `refreshSession` / `ping` /
+//    `pingConfig`) are **answered locally** and never forwarded per-client: a
+//    single Durable Object owns ONE upstream session for the whole deployment
+//    and keeps it alive on its own alarm schedule, whether one device is
+//    connected or ten.
+//
+// 4. **One lyric request per song.** Lyric lookups are coalesced (concurrent
+//    requests for the same track share a single upstream fetch, in the Worker
+//    *and* in the Durable Object) and then cached at the edge. Four devices
+//    starting the same song at the same moment produce exactly one upstream
+//    call; every later play of that song produces none.
 //
 // Token minting mirrors what the web player / librespot do: call
 //    GET https://open.spotify.com/api/token?...&totp=<code>&totpVer=<ver>
@@ -25,7 +42,9 @@
 //    npx wrangler secret put SP_DC     # paste your sp_dc cookie value
 //    npx wrangler deploy
 //
-// Verify (no token exposed):  GET https://<your-worker>/__spicy/tokencheck
+// Verify (no token exposed):
+//    GET https://<your-worker>/__spicy/tokencheck   # can we mint a token?
+//    GET https://<your-worker>/__spicy/stats        # how much upstream traffic?
 
 const API_ORIGIN = "https://api.spicylyrics.org";
 const SPOTIFY_ORIGIN = "https://xpui.app.spotify.com";
@@ -44,6 +63,70 @@ const FALLBACK_SECRET_CIPHER = {
   61: [44, 55, 47, 42, 70, 40, 34, 114, 76, 74, 50, 111, 120, 97, 75, 76, 94, 102, 43, 69, 49, 120, 118, 80, 64, 78],
 };
 
+// Session-lifecycle operations. These never reach the upstream API per client —
+// the shared session hub answers them (see `sessionEnvelope`).
+const SESSION_OPS = new Set([
+  "createSession",
+  "refreshSession",
+  "ping",
+  "pingConfig",
+]);
+
+// The token clients get back for their "session". Deliberately NOT the real
+// upstream token: the browser has no use for it, and handing it out would let a
+// client talk to the API directly under the shared identity, defeating the point.
+const CLIENT_TOKEN = "spicy-proxy-shared-session";
+
+// What the upstream API asks of a well-behaved client, until `pingConfig` tells
+// us otherwise. Only the hub uses these — clients get `clientPingConfig()`.
+const UPSTREAM_DEFAULTS = {
+  pingIntervalMs: 300000,
+  minPingIntervalMs: 240000,
+  sessionTtlSeconds: 3600,
+  refreshAtTtlFraction: 0.8,
+};
+
+const OK = 200;
+const SESSION_DEAD = 403;
+const CREATE_BACKOFF_BASE_MS = 15000;
+const CREATE_BACKOFF_MAX_MS = 900000; // 15 min — a dead cookie must not be retried hot
+
+// --- config -----------------------------------------------------------------
+
+const LEVELS = { debug: 10, info: 20, warn: 30, error: 40, silent: 99 };
+
+function num(v, fallback) {
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+function cfg(env) {
+  const e = env || {};
+  return {
+    logLevel: LEVELS[String(e.LOG_LEVEL || "info").toLowerCase()] ?? LEVELS.info,
+    clientVersion: e.CLIENT_VERSION || "6.3.12",
+    lyricsCacheTtl: num(e.LYRICS_CACHE_TTL, 604800),
+    lyricsMissCacheTtl: num(e.LYRICS_MISS_CACHE_TTL, 3600),
+    clientPingIntervalMs: num(e.CLIENT_PING_INTERVAL_MS, 900000),
+    clientSessionTtlS: num(e.CLIENT_SESSION_TTL_S, 86400),
+    sessionIdleMs: num(e.SESSION_IDLE_MS, 1800000),
+  };
+}
+
+// Structured logging. Workers Logs indexes the object's fields, so
+// `evt = "upstream"` / `evt = "cache"` are filterable in the dashboard.
+// Enabled by `[observability]` in wrangler.toml; `LOG_LEVEL` tunes the volume
+// without a redeploy (`npx wrangler deploy --var LOG_LEVEL:debug`).
+function makeLog(env, where) {
+  const min = cfg(env).logLevel;
+  return (level, evt, fields) => {
+    if ((LEVELS[level] ?? 0) < min) return;
+    console.log({ level, src: where, evt, ...fields });
+  };
+}
+
+// --- CORS -------------------------------------------------------------------
+
 function corsHeaders(request) {
   const origin = request.headers.get("Origin") || "*";
   return {
@@ -56,44 +139,36 @@ function corsHeaders(request) {
   };
 }
 
-// True if the request body contains a session-lifecycle operation that the API
-// authorizes via the `Authorization` header (session creation / refresh).
-function needsSessionAuth(bodyBuffer) {
-  try {
-    const text = new TextDecoder().decode(bodyBuffer);
-    const parsed = JSON.parse(text);
-    const queries = Array.isArray(parsed?.queries) ? parsed.queries : [];
-    return queries.some(
-      (q) => q?.operation === "createSession" || q?.operation === "refreshSession"
-    );
-  } catch {
-    return false;
-  }
-}
+// --- request classification -------------------------------------------------
 
-// If the body is a single `lyrics` query, return the track id used as the cache
-// key; otherwise null (only plain lyric lookups are edge-cached, never session
-// ops or multi-operation batches).
-function lyricsCacheId(bodyBuffer) {
+// Sort an incoming `/query` body into the three paths that matter:
+//   session  — lifecycle ops, answered locally, never forwarded per client
+//   lyrics   — a single track lookup: coalesced + edge-cached
+//   other    — anything else: plain passthrough, as before
+function classify(bodyBuffer) {
   try {
     const parsed = JSON.parse(new TextDecoder().decode(bodyBuffer));
     const queries = Array.isArray(parsed?.queries) ? parsed.queries : [];
-    if (queries.length !== 1) return null;
-    const q = queries[0];
-    const id = q?.variables?.id;
-    if (q?.operation === "lyrics" && typeof id === "string" && /^[A-Za-z0-9]+$/.test(id)) {
-      return id;
+    if (!queries.length) return { type: "other" };
+    if (queries.every((q) => SESSION_OPS.has(q?.operation))) {
+      return { type: "session", queries };
     }
-    return null;
+    if (queries.length === 1 && queries[0]?.operation === "lyrics") {
+      const id = queries[0]?.variables?.id;
+      if (typeof id === "string" && /^[A-Za-z0-9]{1,64}$/.test(id)) {
+        return { type: "lyrics", id };
+      }
+    }
+    return { type: "other" };
   } catch {
-    return null;
+    return { type: "other" };
   }
 }
 
 // The /query endpoint returns HTTP 200 with a per-operation `httpStatus` inside;
 // pull that inner status so we only cache real results (200) / definite misses
 // (404), never queued (503) or transient errors.
-function lyricsResultStatus(bodyBuffer) {
+function innerStatus(bodyBuffer) {
   try {
     const parsed = JSON.parse(new TextDecoder().decode(bodyBuffer));
     const queries = Array.isArray(parsed?.queries) ? parsed.queries : [];
@@ -105,12 +180,35 @@ function lyricsResultStatus(bodyBuffer) {
   }
 }
 
-function cacheRespHeaders(request, cachedResponse, state) {
-  const h = new Headers();
-  h.set("Content-Type", cachedResponse.headers.get("Content-Type") || "application/json");
-  h.set("X-Spicy-Cache", state);
-  for (const [k, v] of Object.entries(corsHeaders(request))) h.set(k, v);
-  return h;
+// What we tell clients to do with their (proxy-local) session. Long intervals:
+// these pings cost nothing upstream, so there is no reason for four devices to
+// wake up every five minutes. The hub keeps the *real* session alive on the
+// upstream schedule regardless of what clients do.
+function clientPingConfig(c) {
+  return {
+    pingIntervalMs: c.clientPingIntervalMs,
+    minPingIntervalMs: c.clientPingIntervalMs,
+    sessionTtlSeconds: c.clientSessionTtlS,
+    refreshAtTtlFraction: 0.9,
+  };
+}
+
+// Build the `/query` response shape the client parses, for ops we answer here.
+function sessionEnvelope(queries, c) {
+  return {
+    queries: queries.map((q, i) => {
+      const op = q?.operation;
+      let data;
+      if (op === "createSession" || op === "refreshSession") data = { tk: CLIENT_TOKEN };
+      else if (op === "pingConfig") data = clientPingConfig(c);
+      else data = { ok: true };
+      return {
+        operationId: q?.operationId ?? String(i),
+        operation: op,
+        result: { httpStatus: OK, data },
+      };
+    }),
+  };
 }
 
 function openSpotifyHeaders(env) {
@@ -122,6 +220,25 @@ function openSpotifyHeaders(env) {
     "App-Platform": "WebPlayer",
   };
   if (env && env.SP_DC) h.Cookie = `sp_dc=${env.SP_DC}`;
+  return h;
+}
+
+// Headers for an upstream Spicy Lyrics call. `auth` is the minted web-player
+// token (or null); session ops additionally need it in `Authorization`.
+function upstreamHeaders(env, auth, withAuthorization) {
+  const c = cfg(env);
+  const h = new Headers();
+  h.set("Accept", "*/*");
+  h.set("Content-Type", "application/json");
+  h.set("Origin", SPOTIFY_ORIGIN);
+  h.set("Referer", SPOTIFY_ORIGIN + "/");
+  h.set("User-Agent", SPOTIFY_UA);
+  h.set("X-mode", "2");
+  h.set("SpicyLyrics-Version", c.clientVersion);
+  if (auth) {
+    h.set("SpicyLyrics-WebAuth", `Bearer ${auth}`);
+    if (withAuthorization) h.set("Authorization", `Bearer ${auth}`);
+  }
   return h;
 }
 
@@ -200,7 +317,8 @@ async function getSecretDict(env) {
 }
 
 // Cache the minted web-player token for the life of the isolate.
-let cachedToken = null; // { accessToken, expiresAt }
+let cachedToken = null; // { accessToken, expiresAt, version }
+let mintingToken = null; // in-flight mint, so concurrent callers share one
 
 async function mintToken(env) {
   const dict = await getSecretDict(env);
@@ -241,26 +359,493 @@ async function getWebPlayerToken(env) {
   if (cachedToken && Date.now() < cachedToken.expiresAt - 60_000) {
     return cachedToken.accessToken;
   }
-  const minted = await mintToken(env);
+  // Coalesce: a burst of requests after expiry must mint once, not N times.
+  if (!mintingToken) {
+    mintingToken = mintToken(env).finally(() => {
+      mintingToken = null;
+    });
+  }
+  const minted = await mintingToken;
   if (!minted) return null;
   cachedToken = minted;
   return minted.accessToken;
 }
 
+// ---------------------------------------------------------------------------
+// Shared session hub
+//
+// Owns the single upstream session and every upstream lyric fetch. Implemented
+// as a Durable Object so the "single" is a real guarantee across colos, isolates
+// and devices — a Worker isolate is per-location and short-lived, so isolate
+// globals alone would drift back into one session per location.
+// ---------------------------------------------------------------------------
+
+export class SpicySession {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+    this.log = makeLog(env, "hub");
+    this.inflight = new Map(); // trackId -> Promise<{status, contentType, buf}>
+    this.creating = null;
+    this.ready = state.blockConcurrencyWhile(async () => {
+      this.s = (await state.storage.get("s")) || {
+        tk: null,
+        createdAt: 0,
+        lastUpstreamAt: 0,
+        lastClientAt: 0,
+        nextCreateAt: 0,
+        createBackoff: CREATE_BACKOFF_BASE_MS,
+        config: { ...UPSTREAM_DEFAULTS },
+        stats: {
+          since: Date.now(),
+          createSession: 0,
+          refreshSession: 0,
+          ping: 0,
+          pingConfig: 0,
+          lyricsUpstream: 0,
+          lyricsCoalesced: 0,
+          clientOps: 0,
+        },
+      };
+    });
+  }
+
+  save() {
+    return this.state.storage.put("s", this.s);
+  }
+
+  // Fire-and-forget work that must not block the client's response.
+  // `DurableObjectState.waitUntil` only exists on newer runtimes; a DO stays
+  // alive for its own pending promises anyway, so falling back to a bare
+  // promise (with the rejection swallowed) is safe.
+  bg(promise) {
+    const p = Promise.resolve(promise).catch((err) =>
+      this.log("warn", "background_failed", { error: String(err) })
+    );
+    if (typeof this.state.waitUntil === "function") this.state.waitUntil(p);
+  }
+
+  keepAliveMs() {
+    return Math.max(this.s.config.pingIntervalMs, this.s.config.minPingIntervalMs);
+  }
+
+  async armAlarm() {
+    const at = await this.state.storage.getAlarm();
+    const want = Date.now() + this.keepAliveMs();
+    // Only (re)arm if there is no alarm or the pending one is far too late.
+    if (at === null || at > want + 60_000) await this.state.storage.setAlarm(want);
+  }
+
+  // One upstream `/query` call, with the shared identity.
+  async upstream(queries, withAuthorization, tag) {
+    const token = await getWebPlayerToken(this.env);
+    const started = Date.now();
+    try {
+      const res = await fetch(`${API_ORIGIN}/query`, {
+        method: "POST",
+        headers: upstreamHeaders(this.env, token, withAuthorization),
+        body: JSON.stringify({
+          queries,
+          client: { version: cfg(this.env).clientVersion },
+        }),
+      });
+      const json = res.ok ? await res.json().catch(() => null) : null;
+      const result =
+        json?.queries?.find((q) => q.operationId === "0")?.result ?? json?.queries?.[0]?.result;
+      this.log("info", "upstream", {
+        op: tag,
+        http: res.status,
+        inner: result?.httpStatus ?? null,
+        ms: Date.now() - started,
+      });
+      this.s.lastUpstreamAt = Date.now();
+      return result ?? null;
+    } catch (err) {
+      this.log("warn", "upstream_failed", { op: tag, error: String(err) });
+      return null;
+    }
+  }
+
+  async syncPingConfig() {
+    const r = await this.upstream([{ operation: "pingConfig", variables: {} }], false, "pingConfig");
+    this.s.stats.pingConfig++;
+    const d = r?.httpStatus === OK ? r.data : null;
+    if (!d || typeof d !== "object") return;
+    const pos = (v) => typeof v === "number" && Number.isFinite(v) && v > 0;
+    if (pos(d.pingIntervalMs)) this.s.config.pingIntervalMs = d.pingIntervalMs;
+    if (pos(d.minPingIntervalMs)) this.s.config.minPingIntervalMs = d.minPingIntervalMs;
+    if (pos(d.sessionTtlSeconds)) this.s.config.sessionTtlSeconds = d.sessionTtlSeconds;
+    if (pos(d.refreshAtTtlFraction) && d.refreshAtTtlFraction <= 1) {
+      this.s.config.refreshAtTtlFraction = d.refreshAtTtlFraction;
+    }
+  }
+
+  // Open the one shared session. Failures back off hard (up to 15 min) so a
+  // dead SP_DC cookie can never turn into a retry storm against the API —
+  // clients are answered locally either way and never see the difference.
+  ensureSession() {
+    if (this.s.tk) return Promise.resolve(this.s.tk);
+    if (this.creating) return this.creating;
+    if (Date.now() < this.s.nextCreateAt) return Promise.resolve(null);
+
+    this.creating = (async () => {
+      await this.syncPingConfig();
+      const r = await this.upstream(
+        [{ operation: "createSession", variables: {} }],
+        true,
+        "createSession"
+      );
+      this.s.stats.createSession++;
+      if (r?.httpStatus === OK && r.data?.tk) {
+        this.s.tk = r.data.tk;
+        this.s.createdAt = Date.now();
+        this.s.createBackoff = CREATE_BACKOFF_BASE_MS;
+        this.s.nextCreateAt = 0;
+        this.log("info", "session_opened", {});
+        await this.armAlarm();
+      } else {
+        this.s.nextCreateAt = Date.now() + this.s.createBackoff;
+        this.s.createBackoff = Math.min(this.s.createBackoff * 2, CREATE_BACKOFF_MAX_MS);
+        this.log("warn", "session_open_failed", { retryInMs: this.s.createBackoff });
+      }
+      await this.save();
+      return this.s.tk;
+    })().finally(() => {
+      this.creating = null;
+    });
+    return this.creating;
+  }
+
+  async dropSession(why) {
+    this.log("info", "session_dropped", { why });
+    this.s.tk = null;
+    this.s.createdAt = 0;
+    await this.state.storage.deleteAlarm();
+    await this.save();
+  }
+
+  // Keep-alive. Runs on the DO's own alarm, so the upstream ping cadence is
+  // fixed by the API's config and completely independent of how many devices
+  // are connected (or whether any of them is awake).
+  async alarm() {
+    await this.ready;
+    if (!this.s.tk) return;
+
+    const idleFor = Date.now() - this.s.lastClientAt;
+    if (idleFor > cfg(this.env).sessionIdleMs) {
+      // Nobody is listening. Let the session lapse rather than ping forever.
+      await this.dropSession("idle");
+      return;
+    }
+
+    const ttlMs = this.s.config.sessionTtlSeconds * 1000;
+    const due = this.s.createdAt + ttlMs * this.s.config.refreshAtTtlFraction;
+    if (Date.now() >= due) {
+      await this.syncPingConfig();
+      const r = await this.upstream(
+        [{ operation: "refreshSession", variables: { tk: this.s.tk } }],
+        true,
+        "refreshSession"
+      );
+      this.s.stats.refreshSession++;
+      if (r?.httpStatus === OK && r.data?.tk) {
+        this.s.tk = r.data.tk;
+        this.s.createdAt = Date.now();
+      } else if (r?.httpStatus === SESSION_DEAD || !r) {
+        this.s.tk = null;
+        await this.save();
+        await this.ensureSession();
+        await this.armAlarm();
+        return;
+      }
+    } else {
+      const r = await this.upstream(
+        [{ operation: "ping", variables: { tk: this.s.tk } }],
+        false,
+        "ping"
+      );
+      this.s.stats.ping++;
+      if (r?.httpStatus === SESSION_DEAD) {
+        this.s.tk = null;
+        await this.save();
+        await this.ensureSession();
+        await this.armAlarm();
+        return;
+      }
+    }
+
+    await this.save();
+    await this.state.storage.setAlarm(Date.now() + this.keepAliveMs());
+  }
+
+  // A client's session op. Nothing is forwarded: we only note that somebody is
+  // listening, make sure the shared session exists, and keep the alarm armed.
+  async touch() {
+    this.s.lastClientAt = Date.now();
+    this.s.stats.clientOps++;
+    this.bg(
+      (async () => {
+        await this.ensureSession();
+        await this.armAlarm();
+        await this.save();
+      })()
+    );
+  }
+
+  // Upstream lyric fetch, coalesced per track id.
+  async lyrics(id, bodyText) {
+    this.s.lastClientAt = Date.now();
+    let p = this.inflight.get(id);
+    if (p) {
+      this.s.stats.lyricsCoalesced++;
+      this.log("debug", "lyrics_coalesced", { id });
+    } else {
+      this.s.stats.lyricsUpstream++;
+      p = this.fetchLyrics(id, bodyText).finally(() => this.inflight.delete(id));
+      this.inflight.set(id, p);
+      this.bg(this.ensureSession());
+    }
+    this.bg(this.save());
+    return p;
+  }
+
+  async fetchLyrics(id, bodyText) {
+    const token = await getWebPlayerToken(this.env);
+    const started = Date.now();
+    try {
+      const res = await fetch(`${API_ORIGIN}/query`, {
+        method: "POST",
+        headers: upstreamHeaders(this.env, token, false),
+        body: bodyText,
+      });
+      const buf = await res.arrayBuffer();
+      this.log("info", "upstream", {
+        op: "lyrics",
+        id,
+        http: res.status,
+        inner: innerStatus(buf),
+        bytes: buf.byteLength,
+        ms: Date.now() - started,
+      });
+      this.s.lastUpstreamAt = Date.now();
+      return {
+        status: res.status,
+        contentType: res.headers.get("Content-Type") || "application/json",
+        buf,
+      };
+    } catch (err) {
+      this.log("warn", "upstream_failed", { op: "lyrics", id, error: String(err) });
+      return {
+        status: 502,
+        contentType: "application/json",
+        buf: new TextEncoder().encode(JSON.stringify({ queries: [] })).buffer,
+      };
+    }
+  }
+
+  async fetch(request) {
+    await this.ready;
+    const url = new URL(request.url);
+
+    if (url.pathname === "/touch") {
+      await this.touch();
+      return Response.json({ ok: true });
+    }
+
+    if (url.pathname === "/lyrics") {
+      const id = request.headers.get("x-slp-id") || "";
+      const r = await this.lyrics(id, await request.text());
+      return new Response(r.buf, {
+        status: r.status,
+        headers: { "Content-Type": r.contentType },
+      });
+    }
+
+    if (url.pathname === "/stats") {
+      return Response.json({
+        mode: "durable-object",
+        sessionOpen: !!this.s.tk,
+        sessionAgeSeconds: this.s.createdAt ? Math.round((Date.now() - this.s.createdAt) / 1000) : 0,
+        upstreamKeepAliveEverySeconds: Math.round(this.keepAliveMs() / 1000),
+        lastUpstreamAt: this.s.lastUpstreamAt || null,
+        lastClientAt: this.s.lastClientAt || null,
+        upstreamConfig: this.s.config,
+        stats: this.s.stats,
+      });
+    }
+
+    return new Response("not found", { status: 404 });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Fallback hub — used only when no Durable Object binding exists (e.g. the
+// worker was pasted straight into the dashboard). Same contract, weaker
+// guarantee: state lives in the isolate, so "one session" holds per isolate
+// rather than globally, and the keep-alive piggybacks on client pings instead
+// of an alarm. Still collapses N devices in the common single-location case.
+// ---------------------------------------------------------------------------
+
+const memHub = {
+  tk: null,
+  createdAt: 0,
+  lastUpstreamAt: 0,
+  lastKeepAliveAt: 0,
+  nextCreateAt: 0,
+  createBackoff: CREATE_BACKOFF_BASE_MS,
+  creating: null,
+  config: { ...UPSTREAM_DEFAULTS },
+  inflight: new Map(),
+  stats: {
+    since: Date.now(),
+    createSession: 0,
+    refreshSession: 0,
+    ping: 0,
+    pingConfig: 0,
+    lyricsUpstream: 0,
+    lyricsCoalesced: 0,
+    clientOps: 0,
+  },
+};
+
+async function memUpstream(env, queries, withAuthorization, tag) {
+  const log = makeLog(env, "hub-mem");
+  const token = await getWebPlayerToken(env);
+  try {
+    const res = await fetch(`${API_ORIGIN}/query`, {
+      method: "POST",
+      headers: upstreamHeaders(env, token, withAuthorization),
+      body: JSON.stringify({ queries, client: { version: cfg(env).clientVersion } }),
+    });
+    const json = res.ok ? await res.json().catch(() => null) : null;
+    memHub.lastUpstreamAt = Date.now();
+    const result =
+      json?.queries?.find((q) => q.operationId === "0")?.result ?? json?.queries?.[0]?.result;
+    log("info", "upstream", { op: tag, http: res.status, inner: result?.httpStatus ?? null });
+    return result ?? null;
+  } catch (err) {
+    log("warn", "upstream_failed", { op: tag, error: String(err) });
+    return null;
+  }
+}
+
+async function memEnsure(env) {
+  if (memHub.tk) return memHub.tk;
+  if (memHub.creating) return memHub.creating;
+  if (Date.now() < memHub.nextCreateAt) return null;
+  memHub.creating = (async () => {
+    const r = await memUpstream(env, [{ operation: "createSession", variables: {} }], true, "createSession");
+    memHub.stats.createSession++;
+    if (r?.httpStatus === OK && r.data?.tk) {
+      memHub.tk = r.data.tk;
+      memHub.createdAt = Date.now();
+      memHub.lastKeepAliveAt = Date.now();
+      memHub.createBackoff = CREATE_BACKOFF_BASE_MS;
+    } else {
+      memHub.nextCreateAt = Date.now() + memHub.createBackoff;
+      memHub.createBackoff = Math.min(memHub.createBackoff * 2, CREATE_BACKOFF_MAX_MS);
+    }
+    return memHub.tk;
+  })().finally(() => {
+    memHub.creating = null;
+  });
+  return memHub.creating;
+}
+
+async function memTouch(env) {
+  memHub.stats.clientOps++;
+  await memEnsure(env);
+  if (!memHub.tk) return;
+  const every = Math.max(memHub.config.pingIntervalMs, memHub.config.minPingIntervalMs);
+  if (Date.now() - memHub.lastKeepAliveAt < every) return;
+  memHub.lastKeepAliveAt = Date.now();
+  const r = await memUpstream(env, [{ operation: "ping", variables: { tk: memHub.tk } }], false, "ping");
+  memHub.stats.ping++;
+  if (r?.httpStatus === SESSION_DEAD) memHub.tk = null;
+}
+
+async function memLyrics(env, id, bodyText) {
+  let p = memHub.inflight.get(id);
+  if (p) {
+    memHub.stats.lyricsCoalesced++;
+    return p;
+  }
+  memHub.stats.lyricsUpstream++;
+  p = (async () => {
+    const token = await getWebPlayerToken(env);
+    const res = await fetch(`${API_ORIGIN}/query`, {
+      method: "POST",
+      headers: upstreamHeaders(env, token, false),
+      body: bodyText,
+    });
+    memHub.lastUpstreamAt = Date.now();
+    return {
+      status: res.status,
+      contentType: res.headers.get("Content-Type") || "application/json",
+      buf: await res.arrayBuffer(),
+    };
+  })().finally(() => memHub.inflight.delete(id));
+  memHub.inflight.set(id, p);
+  return p;
+}
+
+// Route to the Durable Object when bound, otherwise to the in-isolate fallback.
+function hub(env) {
+  if (env && env.SESSION) {
+    const stub = env.SESSION.get(env.SESSION.idFromName("shared"));
+    return {
+      touch: () => stub.fetch("https://hub/touch", { method: "POST" }),
+      lyrics: (id, bodyText) =>
+        stub.fetch("https://hub/lyrics", {
+          method: "POST",
+          headers: { "x-slp-id": id },
+          body: bodyText,
+        }),
+      stats: () => stub.fetch("https://hub/stats"),
+    };
+  }
+  return {
+    touch: async () => {
+      await memTouch(env);
+      return Response.json({ ok: true });
+    },
+    lyrics: async (id, bodyText) => {
+      const r = await memLyrics(env, id, bodyText);
+      return new Response(r.buf, { status: r.status, headers: { "Content-Type": r.contentType } });
+    },
+    stats: async () =>
+      Response.json({
+        mode: "isolate-fallback",
+        sessionOpen: !!memHub.tk,
+        sessionAgeSeconds: memHub.createdAt ? Math.round((Date.now() - memHub.createdAt) / 1000) : 0,
+        lastUpstreamAt: memHub.lastUpstreamAt || null,
+        upstreamConfig: memHub.config,
+        stats: memHub.stats,
+      }),
+  };
+}
+
+// --- Worker -----------------------------------------------------------------
+
+// Same-isolate coalescing in front of the hub, so a burst from four devices in
+// one colo does not even cross the DO boundary four times.
+const edgeInflight = new Map(); // trackId -> Promise<{status, contentType, buf}>
+
 export default {
   async fetch(request, env, ctx) {
+    const log = makeLog(env, "proxy");
+    const c = cfg(env);
+
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders(request) });
     }
 
     const inUrl = new URL(request.url);
+    const cors = corsHeaders(request);
 
     // Diagnostic: confirms token minting works without ever exposing the token.
     if (inUrl.pathname === "/__spicy/tokencheck") {
-      const cors = corsHeaders(request);
-      if (!env || !env.SP_DC) {
-        return json({ ok: false, reason: "SP_DC not set" }, cors);
-      }
+      if (!env || !env.SP_DC) return json({ ok: false, reason: "SP_DC not set" }, cors);
       cachedToken = null;
       const minted = await mintToken(env);
       return json(
@@ -271,109 +856,134 @@ export default {
       );
     }
 
-    const target = API_ORIGIN + inUrl.pathname + inUrl.search;
-
-    const headers = new Headers();
-    headers.set("Accept", "*/*");
-    headers.set("Content-Type", "application/json");
-    headers.set("Origin", SPOTIFY_ORIGIN);
-    headers.set("Referer", SPOTIFY_ORIGIN + "/");
-    headers.set("User-Agent", SPOTIFY_UA);
-    headers.set("X-mode", request.headers.get("X-mode") || "2");
-    headers.set(
-      "SpicyLyrics-Version",
-      request.headers.get("SpicyLyrics-Version") || "6.2.3"
-    );
-
-    // Prefer a web-player token minted from SP_DC (unlocks synced lyrics);
-    // otherwise fall through to whatever token the page sent (text only).
-    const webPlayerToken = await getWebPlayerToken(env);
-    const auth = webPlayerToken
-      ? `Bearer ${webPlayerToken}`
-      : request.headers.get("SpicyLyrics-WebAuth");
-    if (auth) headers.set("SpicyLyrics-WebAuth", auth);
+    // Diagnostic: how much traffic actually reaches the Spicy Lyrics API.
+    // `stats.clientOps` counts what devices asked for; `stats.ping` +
+    // `stats.lyricsUpstream` count what we forwarded. The gap is the point.
+    if (inUrl.pathname === "/__spicy/stats") {
+      const res = await hub(env).stats();
+      const body = await res.text();
+      return new Response(body, {
+        status: res.status,
+        headers: { "Content-Type": "application/json", ...cors },
+      });
+    }
 
     const body =
       request.method === "GET" || request.method === "HEAD"
         ? undefined
         : await request.arrayBuffer();
 
-    // The Spicy Lyrics API (v6.2.3+) uses a session model: clients call
-    // `createSession` (→ session token) and keep it alive with `ping`/
-    // `refreshSession`/`pingConfig`. Non-session `/query` traffic gets rate
-    // limited. The session-creating ops read the `Authorization` header (a
-    // Spotify token) — which a browser can't set and this worker otherwise
-    // drops. Inject the same web-player token used for lyrics so the session
-    // and the lyric queries share one identity. Only for the session ops, to
-    // avoid touching lyric-query behaviour.
-    if (webPlayerToken && body && needsSessionAuth(body)) {
-      headers.set("Authorization", `Bearer ${webPlayerToken}`);
+    const kind = body ? classify(body) : { type: "other" };
+
+    // --- Session lifecycle: answered here, never forwarded per client. -------
+    if (kind.type === "session") {
+      // Fire-and-forget: the client's answer never waits on (or fails with) the
+      // shared session's health.
+      ctx.waitUntil(
+        hub(env)
+          .touch()
+          .catch((err) => log("warn", "touch_failed", { error: String(err) }))
+      );
+      log("debug", "session_op_local", {
+        ops: kind.queries.map((q) => q?.operation).join(","),
+      });
+      return json(sessionEnvelope(kind.queries, c), { ...cors, "X-Spicy-Session": "shared" });
     }
 
-    // Edge cache for lyric lookups. Lyrics are immutable per track, so the first
-    // device to request a song populates the cache and every later request (any
-    // device through this Worker) is served from the edge without hitting Spicy
-    // Lyrics again — collapsing N devices into one upstream call per song. Only
-    // single `lyrics` queries are cached; session ops always pass through. The
-    // cached entry stores just the body (no per-request CORS), so CORS headers
-    // are re-applied fresh on every response.
-    const cacheId = body ? lyricsCacheId(body) : null;
-    const cache = caches.default;
-    const cacheKey = cacheId
-      ? new Request(`https://slcache.internal/lyrics/${cacheId}`, { method: "GET" })
-      : null;
+    // --- Lyrics: edge cache → in-isolate coalescing → shared hub. ------------
+    if (kind.type === "lyrics") {
+      const cache = caches.default;
+      const cacheKey = new Request(`https://slcache.internal/lyrics/${kind.id}`, { method: "GET" });
 
-    if (cacheKey) {
       const hit = await cache.match(cacheKey);
       if (hit) {
-        const cachedBody = await hit.arrayBuffer();
-        return new Response(cachedBody, {
+        log("debug", "cache", { id: kind.id, state: "hit" });
+        return new Response(await hit.arrayBuffer(), {
           status: 200,
-          headers: cacheRespHeaders(request, hit, "hit"),
+          headers: {
+            "Content-Type": hit.headers.get("Content-Type") || "application/json",
+            "X-Spicy-Cache": "hit",
+            ...cors,
+          },
         });
       }
-    }
 
-    const upstream = await fetch(target, { method: request.method, headers, body });
-
-    // Non-cacheable (session ops, non-lyrics): stream straight through as before.
-    if (!cacheKey) {
-      const respHeaders = new Headers(upstream.headers);
-      for (const [k, v] of Object.entries(corsHeaders(request))) {
-        respHeaders.set(k, v);
+      const bodyText = new TextDecoder().decode(body);
+      let shared = edgeInflight.get(kind.id);
+      const coalesced = !!shared;
+      if (!shared) {
+        shared = (async () => {
+          const res = await hub(env).lyrics(kind.id, bodyText);
+          return {
+            status: res.status,
+            contentType: res.headers.get("Content-Type") || "application/json",
+            buf: await res.arrayBuffer(),
+          };
+        })().finally(() => edgeInflight.delete(kind.id));
+        edgeInflight.set(kind.id, shared);
       }
-      return new Response(upstream.body, {
-        status: upstream.status,
-        statusText: upstream.statusText,
-        headers: respHeaders,
+      let r;
+      try {
+        r = await shared;
+      } catch (err) {
+        log("error", "hub_failed", { id: kind.id, error: String(err) });
+        return json({ queries: [] }, { ...cors, "X-Spicy-Cache": "error" });
+      }
+
+      // Cache a found result for a long time; a definite "not found" briefly (so
+      // a song without lyrics isn't re-queried every play). Never cache 503
+      // (queued) or transient errors.
+      const inner = innerStatus(r.buf);
+      let ttl = 0;
+      if (r.status === 200 && inner === 200) ttl = c.lyricsCacheTtl;
+      else if (r.status === 200 && inner === 404) ttl = c.lyricsMissCacheTtl;
+      if (ttl > 0) {
+        ctx.waitUntil(
+          cache.put(
+            cacheKey,
+            new Response(r.buf, {
+              headers: { "Content-Type": r.contentType, "Cache-Control": `max-age=${ttl}` },
+            })
+          )
+        );
+      }
+
+      log("info", "cache", {
+        id: kind.id,
+        state: coalesced ? "coalesced" : "miss",
+        inner,
+        ttl,
+      });
+
+      return new Response(r.buf, {
+        status: r.status,
+        headers: {
+          "Content-Type": r.contentType,
+          "X-Spicy-Cache": coalesced ? "coalesced" : "miss",
+          ...cors,
+        },
       });
     }
 
-    // Cacheable path: buffer so we can inspect the inner result and store it.
-    const buf = await upstream.arrayBuffer();
-    const contentType = upstream.headers.get("Content-Type") || "application/json";
-    const innerStatus = lyricsResultStatus(buf);
-
-    // Cache a found result for a long time; a definite "not found" briefly (so a
-    // song without lyrics isn't re-queried every play). Never cache 503 (queued)
-    // or transient errors.
-    let ttl = 0;
-    if (upstream.status === 200 && innerStatus === 200) ttl = 604800; // 7 days
-    else if (upstream.status === 200 && innerStatus === 404) ttl = 3600; // 1 hour
-    if (ttl > 0) {
-      const toCache = new Response(buf, {
-        headers: { "Content-Type": contentType, "Cache-Control": `max-age=${ttl}` },
-      });
-      ctx.waitUntil(cache.put(cacheKey, toCache));
+    // --- Everything else: plain passthrough with the shared identity. --------
+    const token = await getWebPlayerToken(env);
+    const headers = upstreamHeaders(env, token, false);
+    if (!token) {
+      const clientAuth = request.headers.get("SpicyLyrics-WebAuth");
+      if (clientAuth) headers.set("SpicyLyrics-WebAuth", clientAuth);
     }
+    headers.set("X-mode", request.headers.get("X-mode") || "2");
 
-    const respHeaders = new Headers();
-    respHeaders.set("Content-Type", contentType);
-    respHeaders.set("X-Spicy-Cache", "miss");
-    for (const [k, v] of Object.entries(corsHeaders(request))) {
-      respHeaders.set(k, v);
-    }
-    return new Response(buf, {
+    const upstream = await fetch(API_ORIGIN + inUrl.pathname + inUrl.search, {
+      method: request.method,
+      headers,
+      body,
+    });
+    log("info", "passthrough", { path: inUrl.pathname, http: upstream.status });
+
+    const respHeaders = new Headers(upstream.headers);
+    for (const [k, v] of Object.entries(cors)) respHeaders.set(k, v);
+    return new Response(upstream.body, {
       status: upstream.status,
       statusText: upstream.statusText,
       headers: respHeaders,
