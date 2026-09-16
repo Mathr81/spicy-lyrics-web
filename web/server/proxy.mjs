@@ -227,6 +227,23 @@ function blockKind(buf) {
   }
 }
 
+// Node's fetch rejects with a bare `TypeError: fetch failed` and puts the real
+// reason in `cause` — ECONNREFUSED, ENOTFOUND, a TLS failure, or one of
+// outbound.mjs's own messages when a configured PROXY_URL cannot be reached.
+// Logging the error by itself therefore says nothing at all, which is the
+// opposite of what someone staring at a 502 needs. Walk the chain instead.
+function describeError(err) {
+  const parts = [];
+  let e = err;
+  for (let depth = 0; e && depth < 4; depth++) {
+    const message = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+    const text = e?.code ? `${message} (${e.code})` : message;
+    if (!parts.includes(text)) parts.push(text);
+    e = e?.cause;
+  }
+  return parts.join(" <- ");
+}
+
 // The /query endpoint returns HTTP 200 with a per-operation `httpStatus` inside;
 // pull that inner status so we only cache real results (200) / definite misses
 // (404), never queued (503) or transient errors.
@@ -497,7 +514,7 @@ export class SessionHub {
     this.timer = setTimeout(
       () => {
         this.s.alarmAt = null;
-        this.alarm().catch((err) => this.log("warn", "alarm_failed", { error: String(err) }));
+        this.alarm().catch((err) => this.log("warn", "alarm_failed", { error: describeError(err) }));
       },
       Math.max(0, this.s.alarmAt - Date.now())
     );
@@ -516,7 +533,7 @@ export class SessionHub {
   // only the rejection has to be swallowed.
   bg(promise) {
     return Promise.resolve(promise).catch((err) =>
-      this.log("warn", "background_failed", { error: String(err) })
+      this.log("warn", "background_failed", { error: describeError(err) })
     );
   }
 
@@ -591,7 +608,7 @@ export class SessionHub {
       this.s.lastUpstreamAt = Date.now();
       return result;
     } catch (err) {
-      this.log("warn", "upstream_failed", { op: tag, error: String(err) });
+      this.log("warn", "upstream_failed", { op: tag, error: describeError(err) });
       return null;
     }
   }
@@ -775,11 +792,17 @@ export class SessionHub {
       });
       return { status: res.status, contentType, buf };
     } catch (err) {
-      this.log("warn", "upstream_failed", { op: "lyrics", id, error: String(err) });
+      this.log("warn", "upstream_failed", { op: "lyrics", id, error: describeError(err) });
+      // Name it in the body too. `queries: []` alone reads as "no lyrics" to
+      // anyone holding a terminal, when it actually means the request never
+      // left the machine — check the logs for `evt="upstream_failed"`.
       return {
         status: 502,
         contentType: "application/json",
-        buf: new TextEncoder().encode(JSON.stringify({ queries: [] })).buffer,
+        unreachable: true,
+        buf: new TextEncoder()
+          .encode(JSON.stringify({ error: "upstream-unreachable", queries: [] }))
+          .buffer,
       };
     }
   }
@@ -899,7 +922,7 @@ export function createProxy({ env = {}, cache, store }) {
       try {
         r = await hub.lyrics(kind.id, new TextDecoder().decode(body));
       } catch (err) {
-        log("error", "hub_failed", { id: kind.id, error: String(err) });
+        log("error", "hub_failed", { id: kind.id, error: describeError(err) });
         return json({ queries: [] }, { ...cors, "X-Spicy-Cache": "error" });
       }
 
@@ -929,6 +952,8 @@ export function createProxy({ env = {}, cache, store }) {
       // Lets the page say "the API blocked this proxy" instead of "an error
       // occurred" — the two need very different reactions from the operator.
       if (r.blocked) outHeaders["X-Spicy-Upstream"] = "blocked";
+      // Same idea for a call that never got a reply at all.
+      if (r.unreachable) outHeaders["X-Spicy-Upstream"] = "unreachable";
       return new Response(r.buf, { status: r.status, headers: outHeaders });
     }
 
