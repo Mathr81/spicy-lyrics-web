@@ -376,6 +376,32 @@ sudo ss -lntp | grep 1080     # must not be 127.0.0.1:1080 only
 PROXY_URL=socks5://172.18.0.1:1080
 ```
 
+With an SSH dynamic forward, that means giving `-D` an explicit bind address —
+`ssh -D 1080` listens on `127.0.0.1` only:
+
+```bash
+ssh -D 172.18.0.1:1080 -N user@host      # not: ssh -D 1080
+# if your client refuses the non-loopback bind: -o GatewayPorts=yes
+```
+
+Check it from inside the container before blaming the proxy — this separates
+"cannot reach the tunnel" from "the tunnel refused the handshake":
+
+```bash
+docker exec spicy-lyrics-proxy node -e "const s=require('net').connect(1080,'172.18.0.1');s.setTimeout(3000,()=>{console.log('NOT reachable: timeout');process.exit(1)});s.on('connect',()=>{console.log('reachable');process.exit(0)});s.on('error',e=>{console.log('NOT reachable:',e.code);process.exit(1)})"
+```
+
+`reachable` → good. `timeout` → no route (wrong gateway, or the tunnel is
+loopback-bound). `ECONNREFUSED` → the address is right but nothing is listening
+on that port.
+
+> **Two things to know before settling on the gateway address.** It is reachable
+> by *every* container on that network, so the tunnel is shared with your whole
+> reverse-proxy stack — not exposed outside the host, but not private either. And
+> Docker assigns the subnet when it creates the network, so recreating it can
+> move `172.18.0.1` and silently break `PROXY_URL`. Running the tunnel as a
+> container on the network avoids both: a container name never changes.
+
 > `extra_hosts: ["host.docker.internal:host-gateway"]` does **not** work here,
 > though it is the advice you will find everywhere. It resolves to the *default*
 > bridge's gateway (`172.17.0.1`), and a container attached to a user-defined
