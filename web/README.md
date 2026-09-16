@@ -350,10 +350,38 @@ The startup log always states where outbound traffic goes, and a proxy that
 cannot be reached fails the request rather than quietly falling back to a direct
 connection.
 
-In Docker, `127.0.0.1` is the *container*, not your host. To reach a tunnel
-running on the host, add `extra_hosts: ["host.docker.internal:host-gateway"]` to
-the service in `compose.yaml` and set
-`PROXY_URL=socks5://host.docker.internal:1080`.
+### Reaching the tunnel from inside the container
+
+`127.0.0.1` in `PROXY_URL` is the *container*, not your host — so a tunnel
+running on the machine needs an address the container can actually route to.
+
+**If the tunnel is itself a container**, this is easy and is the setup to prefer:
+put it on the same network as the proxy and use its container name.
+
+```bash
+PROXY_URL=socks5://my-tunnel:1080
+```
+
+**If the tunnel runs on the host**, use the gateway address of *this container's*
+network, and make sure the tunnel listens on it — one bound to `127.0.0.1` is
+unreachable from every container, whatever address you point at it:
+
+```bash
+docker network inspect npm_default -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}'
+# -> 172.18.0.1
+sudo ss -lntp | grep 1080     # must not be 127.0.0.1:1080 only
+```
+
+```bash
+PROXY_URL=socks5://172.18.0.1:1080
+```
+
+> `extra_hosts: ["host.docker.internal:host-gateway"]` does **not** work here,
+> though it is the advice you will find everywhere. It resolves to the *default*
+> bridge's gateway (`172.17.0.1`), and a container attached to a user-defined
+> network — which is exactly what joining the reverse proxy's network means —
+> has no route to it. The symptom is `EHOSTUNREACH 172.17.0.1:<port>` in the
+> logs.
 
 No dependency was added for this: `web/server/outbound.mjs` implements the
 SOCKS5 (RFC 1928/1929) and CONNECT handshakes and hands the resulting socket to
