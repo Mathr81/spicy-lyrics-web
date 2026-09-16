@@ -6,6 +6,7 @@ import PageView, { PageContainer } from "../../components/Pages/PageView.ts";
 import { Query, QueryHttpError, QueryNetworkError } from "../API/Query.ts";
 import { IsTripStatus, ServiceUnavailableError } from "../API/CircuitBreaker.ts";
 import { ProcessLyrics } from "./ProcessLyrics.ts";
+import { IsEmptyLyrics } from "./EmptyLines.ts";
 import Logger from "../Logger.ts";
 import { LocalLyricsManager } from "./manager/index.ts";
 import { LyricsQueueRetry } from "./LyricsQueueRetry.ts";
@@ -16,7 +17,7 @@ const lyricsLogger = new Logger("Lyrics Pipeline");
 const lyricsCacheLogger = new Logger("Lyrics Cache");
 
 // recently updated key structure - changed name
-export const LyricsStore = GetExpireStore<any>("SpicyLyrics_LyricsStore_g1", 4, {
+export const LyricsStore = GetExpireStore<any>("SpicyLyrics_LyricsStore_g1", 5, {
   Unit: "Days",
   Duration: 3,
 }, isDev as true);
@@ -241,31 +242,71 @@ async function runFetchLyrics(uri: string): Promise<[object | string, number] | 
     const lyricsAccessToken = storage.get("lyricsApiAccessToken") ?? Defaults.LyricsContent.api.accessToken; */
 
   try {
-    const Token = await Platform.GetSpotifyAccessToken();
-
     let status = 0;
 
-    lyricsLogger.debug("API lyrics query", { trackId });
-    const queries = await Query(
-      [
-        {
-          operation: "lyrics",
-          variables: {
-            id: trackId,
-            auth: "SpicyLyrics-WebAuth",
+    const runLyricsQuery = async (token: string) => {
+      lyricsLogger.debug("API lyrics query", { trackId });
+      const queries = await Query(
+        [
+          {
+            operation: "lyrics",
+            variables: {
+              id: trackId,
+              auth: "SpicyLyrics-WebAuth",
+            },
           },
+        ],
+        {
+          "SpicyLyrics-WebAuth": `Bearer ${token}`,
         },
-      ],
-      {
-        "SpicyLyrics-WebAuth": `Bearer ${Token}`,
-      },
-      // Someone is waiting on this, so it may pass even while the breaker is
-      // open (subject to the breaker's own cooldown) and doubles as the health
-      // check that closes it. This is the only caller allowed to set it.
-      { probe: true }
-    );
+        // Someone is waiting on this, so it may pass even while the breaker is
+        // open (subject to the breaker's own cooldown) and doubles as the health
+        // check that closes it. This is the only caller allowed to set it.
+        { probe: true }
+      );
+      return queries.get("0");
+    };
 
-    const lyricsQuery = queries.get("0");
+    const Token = await Platform.GetSpotifyAccessToken();
+    let lyricsQuery = await runLyricsQuery(Token);
+
+    // The envelope 401: the token we sent was already dead, whatever the client
+    // told us about its expiry. Retire it and try once more with a fresh one —
+    // once only, so a genuinely unauthorized client can't loop.
+    if (lyricsQuery?.httpStatus === 401) {
+      lyricsLogger.warn("Lyrics query unauthorized, refreshing the token and retrying once");
+      Platform.InvalidateSpotifyAccessToken(Token);
+
+      let retryToken: string | undefined;
+      try {
+        retryToken = await Platform.GetSpotifyAccessToken();
+      } catch (error) {
+        // No new token to be had. Keep the 401 we already have rather than
+        // reporting this as a fault of our own.
+        lyricsLogger.warn("Could not refresh the token for the retry", error);
+      }
+
+      if (retryToken && retryToken !== Token) {
+        try {
+          lyricsQuery = await runLyricsQuery(retryToken);
+        } catch (error) {
+          // The retry goes through the circuit breaker like any other request.
+          // If it is held back, keep the 401 instead of overwriting it with the
+          // breaker's own, less accurate, reason.
+          if (error instanceof ServiceUnavailableError) {
+            lyricsLogger.warn("Unauthorized retry suppressed by the breaker", error.message);
+          } else {
+            throw error;
+          }
+        }
+      } else if (retryToken) {
+        // Nothing new to send: the client is still on the token that was just
+        // refused, so a retry would only spend a breaker probe to be told the
+        // same thing.
+        lyricsLogger.warn("Token unchanged after refresh, not retrying");
+      }
+    }
+
     if (!lyricsQuery) {
       lyricsLogger.error("Lyrics query not found");
       HideLoaderContainer();
@@ -313,6 +354,16 @@ async function runFetchLyrics(uri: string): Promise<[object | string, number] | 
     }
 
     await ProcessLyrics(lyrics);
+
+    // Pruning blank lines can empty out a payload the API still counted as a
+    // hit. Nothing would render, so treat it as a miss rather than caching and
+    // publishing an empty lyrics card.
+    if (IsEmptyLyrics(lyrics)) {
+      lyricsLogger.warn("Lyrics payload had no renderable lines after pruning");
+      HideLoaderContainer();
+      $currentlyFetching.set(false);
+      return ["lyrics-not-found", 404];
+    }
 
     // Stamp the uri so every match downstream (saved-data, re-fetch, cache)
     // keys off the stable uri instead of the API-supplied id.
