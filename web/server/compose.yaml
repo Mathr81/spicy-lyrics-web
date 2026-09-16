@@ -9,6 +9,17 @@
 #
 # One container, no dependencies, no database. The image is node:22-alpine plus
 # three source files; at rest the proxy holds a session token and a few counters.
+#
+# NO PORT IS PUBLISHED ON THE HOST. The container joins the reverse proxy's own
+# Docker network (Nginx Proxy Manager's `npm_default` by default) and is reached
+# there by container name. Nothing about it is listening on the machine's
+# interfaces, which is what you want for a service that talks to the Spotify API
+# as your own account.
+#
+# In Nginx Proxy Manager → Proxy Hosts → Add:
+#   Forward Hostname / IP:  spicy-lyrics-proxy
+#   Forward Port:           8787
+#   (+ request a TLS certificate — the page needs HTTPS, see web/README.md)
 
 services:
   proxy:
@@ -17,12 +28,18 @@ services:
     container_name: spicy-lyrics-proxy
     restart: unless-stopped
 
-    # Bound to localhost by default. This proxy speaks to the API as *your*
-    # Spotify account (that is what SP_DC buys), so it is not something to leave
-    # open to the internet — put a TLS reverse proxy in front of it and let that
-    # be the public face. To expose it directly anyway, set BIND=0.0.0.0 in .env.
-    ports:
-      - "${BIND:-127.0.0.1}:${HOST_PORT:-8787}:8787"
+    # Reachable only from the reverse proxy's network, on this port. `expose`
+    # publishes nothing — it documents the port for whoever reads this file.
+    expose:
+      - "8787"
+
+    # Not using a reverse proxy in Docker? Uncomment to publish the port on the
+    # host instead, and keep the 127.0.0.1 — see the note at the top.
+    #ports:
+    #  - "127.0.0.1:8787:8787"
+
+    networks:
+      - reverse-proxy
 
     env_file: .env
 
@@ -53,6 +70,16 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+networks:
+  # Nginx Proxy Manager's network, created by ITS compose file, not this one —
+  # hence `external`. Override the name in .env if yours differs (Docker derives
+  # it from the directory the reverse proxy's compose file lives in, so it is
+  # `npm_default` for a stack in `npm/`, `nginx-proxy-manager_default` for one
+  # in `nginx-proxy-manager/`, …). Check with: docker network ls
+  reverse-proxy:
+    name: ${PROXY_NETWORK:-npm_default}
+    external: true
 
 volumes:
   state:

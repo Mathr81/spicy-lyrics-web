@@ -262,10 +262,26 @@ builds in seconds and idles around 60–80 MB. The compose service runs read-onl
 with all capabilities dropped, caps its own logs, and keeps the session and lyric
 cache in a named volume so restarts and upgrades cost nothing upstream.
 
-It publishes to **`127.0.0.1:8787` by default**, not `0.0.0.0`. The proxy talks
-to the API as *your* Spotify account, so the intended shape is a TLS reverse
-proxy in front of it (see below) rather than an open port. Set `BIND=0.0.0.0` in
-`.env` if you really want it exposed directly.
+**No port is published on the host.** The proxy talks to the API as *your*
+Spotify account, so it is not something to leave listening on a machine's
+interfaces. Instead the container joins the reverse proxy's own Docker network —
+Nginx Proxy Manager's `npm_default` by default — and is reached there by
+container name:
+
+| Nginx Proxy Manager → Proxy Hosts → Add | |
+|---|---|
+| Domain Names | `lyrics.example.com` |
+| Forward Hostname / IP | `spicy-lyrics-proxy` |
+| Forward Port | `8787` |
+| SSL | request a certificate — the page needs HTTPS (see below) |
+
+If your reverse proxy's network is named differently, set `PROXY_NETWORK` in
+`.env`. Docker names it after the directory the reverse proxy's compose file
+lives in (`npm/` → `npm_default`), so check with `docker network ls`. The network
+must already exist — it belongs to the reverse proxy's stack, not to this one.
+
+Not running a reverse proxy in Docker? Uncomment the `ports:` block in
+`compose.yaml` to publish `127.0.0.1:8787` on the host instead.
 
 Updating: `git pull && docker compose up -d --build`.
 
@@ -327,13 +343,13 @@ Then set `VITE_LYRICS_API` to the host's URL and rebuild the page.
 
 > **Serve it over HTTPS.** If the page is on HTTPS (GitHub Pages) and the proxy
 > is on plain `http://`, the browser blocks the request as mixed content and
-> nothing loads. Put [Caddy](https://caddyserver.com/) (automatic certificates)
-> in front — with the default `127.0.0.1` binding that is also what makes the
-> proxy reachable at all. Two lines of Caddyfile are enough:
+> nothing loads. The reverse proxy in front is what terminates TLS — in Nginx
+> Proxy Manager, request a certificate on the proxy host above; with
+> [Caddy](https://caddyserver.com/) instead, two lines do it:
 >
 > ```
 > lyrics.example.com {
->     reverse_proxy 127.0.0.1:8787
+>     reverse_proxy spicy-lyrics-proxy:8787
 > }
 > ```
 >
