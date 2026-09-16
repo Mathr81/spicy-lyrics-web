@@ -1,12 +1,13 @@
 {
-  "name": "spicy-lyrics-proxy-server",
-  "version": "1.0.0",
+  "name": "spicy-lyrics-proxy",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "Standalone Node host that runs web/proxy/worker.js outside Cloudflare Workers.",
+  "description": "CORS + token-injecting proxy for the Spicy Lyrics API: one shared API session and one upstream lyric fetch for every connected device.",
   "scripts": {
     "start": "node server.mjs",
-    "test": "node server.test.mjs && node outbound.test.mjs",
+    "test": "node proxy.test.mjs && node server.test.mjs && node outbound.test.mjs",
+    "test:proxy": "node proxy.test.mjs",
     "test:host": "node server.test.mjs",
     "test:outbound": "node outbound.test.mjs"
   },

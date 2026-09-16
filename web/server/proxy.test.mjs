@@ -1,16 +1,13 @@
-// Smoke test for worker.js — run with `npm test` (needs Node 18+, no network).
+// Offline smoke test for proxy.mjs — run with `npm test` (needs Node 20+).
 //
-// It stubs the Workers platform (fetch, caches.default, a Durable Object
-// namespace) and asserts the property the proxy exists for: N devices are one
-// client from api.spicylyrics.org's point of view.
+// It stubs the network and hands the proxy an in-memory cache and store, then
+// asserts the property the proxy exists for: N devices are one client from
+// api.spicylyrics.org's point of view.
 //
-//   node worker.test.mjs
-import { pathToFileURL } from "node:url";
-import path from "node:path";
+//   node proxy.test.mjs
+import { createProxy } from "./proxy.mjs";
 
-const WORKER = pathToFileURL(path.join(import.meta.dirname, "worker.js")).href;
-
-// --- fake platform ---------------------------------------------------------
+// --- fake network ----------------------------------------------------------
 const upstream = { calls: [] };
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (url, init) => {
@@ -50,51 +47,37 @@ globalThis.fetch = async (url, init) => {
   throw new Error("unexpected fetch " + u);
 };
 
-const store = new Map();
-globalThis.caches = {
-  default: {
-    async match(req) { return store.get(req.url) ? new Response(store.get(req.url), { headers: { "Content-Type": "application/json" } }) : undefined; },
-    async put(req, res) { store.set(req.url, Buffer.from(await res.arrayBuffer())); },
+// --- host stubs ------------------------------------------------------------
+const cached = new Map();
+const cache = {
+  async match(id) {
+    return cached.has(id) ? { buf: cached.get(id), contentType: "application/json" } : undefined;
+  },
+  async put(id, { buf }) {
+    cached.set(id, Buffer.from(buf));
   },
 };
 
-const worker = (await import(WORKER)).default;
+let saved;
+const store = { async load() { return saved; }, async save(s) { saved = structuredClone(s); } };
 
-// --- fake Durable Object namespace ----------------------------------------
-const { SpicySession } = await import(WORKER);
-const storage = new Map();
-let alarmAt = null;
-const doState = {
-  storage: {
-    get: async (k) => storage.get(k),
-    put: async (k, v) => void storage.set(k, structuredClone(v)),
-    getAlarm: async () => alarmAt,
-    setAlarm: async (t) => void (alarmAt = t),
-    deleteAlarm: async () => void (alarmAt = null),
-  },
-  blockConcurrencyWhile: (fn) => fn(),
-  waitUntil: (p) => pending.push(p),
-};
-const pending = [];
-const env = { SP_DC: "fake-cookie", SESSION: null, LOG_LEVEL: "warn" };
-const instance = new SpicySession(doState, env);
-env.SESSION = {
-  idFromName: () => "shared",
-  get: () => ({ fetch: (u, i) => instance.fetch(new Request(u, i)) }),
-};
+const env = { SP_DC: "fake-cookie", LOG_LEVEL: "warn" };
+const proxy = createProxy({ env, cache, store });
+const hub = proxy.hub;
 
-const ctx = { waitUntil: (p) => pending.push(p) };
-const settle = async () => { while (pending.length) await pending.splice(0).map((p) => p); await new Promise((r) => setTimeout(r, 60)); };
+// The proxy does work after answering (opening the session, writing the cache).
+// Nothing reports when that settles, so give it a moment.
+const settle = () => new Promise((r) => setTimeout(r, 80));
 
 const post = (body) =>
-  worker.fetch(new Request("https://proxy.test/query", {
+  proxy.fetch(new Request("https://proxy.test/query", {
     method: "POST",
     headers: { "Content-Type": "application/json", Origin: "https://page.test" },
     body: JSON.stringify(body),
-  }), env, ctx);
+  }));
 
-const sessionOp = (operation, variables = {}) => ({ queries: [{ operationId: "0", operation, variables }], client: { version: "6.3.12" } });
-const lyricsOp = (id) => ({ queries: [{ operationId: "0", operation: "lyrics", variables: { id, auth: "SpicyLyrics-WebAuth" } }], client: { version: "6.3.12" } });
+const sessionOp = (operation, variables = {}) => ({ queries: [{ operationId: "0", operation, variables }], client: { version: "6.3.20" } });
+const lyricsOp = (id) => ({ queries: [{ operationId: "0", operation: "lyrics", variables: { id, auth: "SpicyLyrics-WebAuth" } }], client: { version: "6.3.20" } });
 
 let failed = 0;
 const check = (name, cond, extra = "") => { console.log(`${cond ? "PASS" : "FAIL"}  ${name}${extra ? "  " + extra : ""}`); if (!cond) failed++; };
@@ -125,56 +108,39 @@ const lyricCalls = upstream.calls.filter((c) => c === "lyrics").length;
 check("4 simultaneous devices, same track → 1 upstream lyrics call", lyricCalls === 1, `got ${lyricCalls}`);
 check("all four got a 200", results.every((r) => r.status === 200));
 check("all four got the lyrics body", (await Promise.all(results.map((r) => r.clone().json()))).every((j) => j.queries[0].result.data.Type === "Syllable"));
+check("exactly one of them is reported as the upstream fetch",
+  results.filter((r) => r.headers.get("X-Spicy-Cache") === "miss").length === 1,
+  results.map((r) => r.headers.get("X-Spicy-Cache")).join(","));
 check("CORS echoed", results[0].headers.get("Access-Control-Allow-Origin") === "https://page.test");
 
-// 3. A later request for the same track hits the edge cache.
+// 3. A later request for the same track is served from the cache.
 upstream.calls.length = 0;
 const again = await post(lyricsOp("4cOdK2wGLETKBW3PvgPWqT"));
 await settle();
 check("repeat play → 0 upstream calls", upstream.calls.length === 0, `got ${upstream.calls.length}`);
-check("served from edge cache", again.headers.get("X-Spicy-Cache") === "hit", again.headers.get("X-Spicy-Cache"));
+check("served from cache", again.headers.get("X-Spicy-Cache") === "hit", again.headers.get("X-Spicy-Cache"));
 
-// 4. Keep-alive is armed and driven by the DO alarm, not by clients.
-check("DO alarm armed for keep-alive", alarmAt !== null && alarmAt > Date.now());
+// 4. Keep-alive is armed and driven by the hub's own timer, not by clients.
+check("keep-alive armed", hub.s.alarmAt !== null && hub.s.alarmAt > Date.now());
 upstream.calls.length = 0;
-await instance.alarm();
+await hub.alarm();
 check("one alarm → one upstream ping", upstream.calls.join(",") === "ping", upstream.calls.join(","));
+check("and the next one is scheduled", hub.s.alarmAt > Date.now());
 
 // 5. Stats endpoint.
-const stats = await (await worker.fetch(new Request("https://proxy.test/__spicy/stats"), env, ctx)).json();
-check("stats report shared session open", stats.sessionOpen === true && stats.mode === "durable-object");
-// The three duplicate lyric requests were collapsed by the Worker's own
-// in-isolate map before they ever crossed into the DO — so the DO records one
-// upstream fetch and zero of its own coalesces. Both layers doing their job.
+const stats = await (await proxy.fetch(new Request("https://proxy.test/__spicy/stats"))).json();
+check("stats report the shared session open", stats.sessionOpen === true);
 check("stats show client ops >> upstream traffic",
   stats.stats.clientOps >= 12 && stats.stats.lyricsUpstream === 1,
   `clientOps=${stats.stats.clientOps} lyricsUpstream=${stats.stats.lyricsUpstream}`);
 
-// 6. Same scenario with no Durable Object binding at all (dashboard deploy).
+// 6. State survives a restart: a fresh hub picks up the saved session.
 {
-  const noDo = { SP_DC: "fake-cookie", LOG_LEVEL: "warn" };
-  store.clear();
-  upstream.calls.length = 0;
-  for (let d = 0; d < 4; d++) {
-    await worker.fetch(new Request("https://proxy.test/query", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(sessionOp("createSession")),
-    }), noDo, ctx);
-  }
-  const rs = await Promise.all([0, 1, 2, 3].map(() =>
-    worker.fetch(new Request("https://proxy.test/query", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(lyricsOp("1AbCdEf")),
-    }), noDo, ctx)));
-  await settle();
-  check("fallback (no DO): 4 devices → 1 createSession",
-    upstream.calls.filter((c) => c === "createSession").length === 1,
-    upstream.calls.join(","));
-  check("fallback (no DO): 4 simultaneous lookups → 1 upstream lyrics call",
-    upstream.calls.filter((c) => c === "lyrics").length === 1);
-  check("fallback (no DO): all four served", rs.every((r) => r.status === 200));
-  const fs2 = await (await worker.fetch(new Request("https://proxy.test/__spicy/stats"), noDo, ctx)).json();
-  check("fallback reports its weaker mode", fs2.mode === "isolate-fallback");
+  const revived = createProxy({ env, cache, store });
+  await revived.hub.ready;
+  check("a restarted proxy reuses the saved session", revived.hub.s.tk === hub.s.tk);
+  check("and re-arms its keep-alive without pinging", revived.hub.s.alarmAt !== null);
+  revived.hub.stop();
 }
 
 // 7. An upstream Cloudflare block page is named as such, not passed through as
@@ -188,7 +154,7 @@ check("stats show client ops >> upstream traffic",
   check("upstream block flagged in a header", r.headers.get("X-Spicy-Upstream") === "blocked");
   const j = await r.clone().json();
   check("upstream block returns JSON, never the Cloudflare HTML", j.error === "upstream-blocked");
-  const stats2 = await (await worker.fetch(new Request("https://proxy.test/__spicy/stats"), env, ctx)).json();
+  const stats2 = await (await proxy.fetch(new Request("https://proxy.test/__spicy/stats"))).json();
   check("upstream block counted in stats", stats2.upstreamBlocked?.count >= 1);
 
   upstream.blockNext = false;
@@ -200,6 +166,7 @@ check("stats show client ops >> upstream traffic",
   check("and then succeeds", (await retry.json()).queries[0].result.data.Type === "Syllable");
 }
 
+hub.stop();
 globalThis.fetch = realFetch;
 console.log(failed ? `\n${failed} FAILED` : "\nall good");
 process.exit(failed ? 1 : 0);

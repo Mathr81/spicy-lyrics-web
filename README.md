@@ -41,7 +41,8 @@ Netlify, Cloudflare Pages, your own server…).
 
 **Full setup — Spotify app, synced-lyrics proxy, GitHub Pages auto-deploy — is in
 [`web/README.md`](./web/README.md).** Read that before your first deploy; synced
-(not just static) lyrics need the small Cloudflare Worker described there.
+(not just static) lyrics need the small proxy described there, which runs as a
+single container (`cd web/server && docker compose up -d`).
 
 ## Install as an app
 
@@ -71,7 +72,7 @@ web wrapper that reuses it:
 | `web/src/shim/` | Browser stand-ins for the Spicetify-coupled modules (`SpotifyPlayer`, `Platform`, `PageView`, `Fullscreen`, …). |
 | `web/src/spotify/` | The Spotify adapter — OAuth PKCE, Web Playback SDK, Connect mirror. |
 | `web/src/lyrics/` | Lyrics fetch, API session keep-alive, caching. |
-| `web/proxy/` | The Cloudflare Worker that unlocks synced lyrics + edge-caches them. |
+| `web/server/` | The proxy that unlocks synced lyrics, caches them, and makes every device one client to the API. Plain Node; ships with a Docker Compose file. |
 | `vite.config.ts` | Wires it together — aliases + a plugin that swaps the shimmed modules at build time. |
 
 ## Keeping up with upstream Spicy Lyrics

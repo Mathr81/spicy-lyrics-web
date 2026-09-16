@@ -1,44 +1,37 @@
 #!/usr/bin/env node
-// Standalone host for the Spicy Lyrics proxy — runs `../proxy/worker.js`
-// unmodified on plain Node (a VPS, a home server, a container).
+// HTTP host for the Spicy Lyrics proxy — a VPS, a home server, a container.
 //
-// Why this exists: api.spicylyrics.org's WAF refuses requests coming from
-// Cloudflare Workers (a byte-identical POST returns 200 from an ordinary
-// address and a Cloudflare block page from a Worker). Running the same proxy
-// from a normal machine puts the requests back on a normal network path.
-//
-// Why it imports the Worker instead of reimplementing it: the interesting parts
-// — the TOTP web-player token minting, the single shared API session, the
-// request coalescing — are exactly the parts that must not drift between two
-// copies. Node 20 already provides fetch/Request/Response/crypto.subtle, so the
-// only things missing are `caches` and the Durable Object runtime. This file is
-// those two shims plus an HTTP server; the proxy logic lives in one place.
+// `proxy.mjs` holds the logic (CORS, the minted web-player token, the single
+// shared API session, coalescing). This file is the parts that touch the
+// machine: an HTTP server, a lyric cache on disk, and the hub's state in a JSON
+// file. One process is one hub, so "every device is one client to the API" is a
+// property of running it, not something to configure.
 //
 //   node server.mjs                 # listens on $PORT (default 8787)
 //
-// Configuration is the same names as the Worker's wrangler `[vars]`, read from
-// the environment:
+// Configuration, all from the environment:
 //
 //   SP_DC                    required for synced lyrics (your Spotify cookie)
 //   PORT                     default 8787
 //   STATE_DIR                default ./.state — session + lyric cache on disk
 //   PROXY_URL                send the proxy's OWN outbound requests through
 //                            another proxy, e.g. socks5://127.0.0.1:1080
-//                            (also read from ALL_PROXY / HTTPS_PROXY / HTTP_PROXY)
+//                            (also read from ALL_PROXY)
 //   LOG_LEVEL                debug | info | warn | error | silent
+//   API_ORIGIN               upstream base URL (default https://api.spicylyrics.org)
 //   CLIENT_VERSION, LYRICS_CACHE_TTL, LYRICS_MISS_CACHE_TTL,
 //   CLIENT_PING_INTERVAL_MS, CLIENT_SESSION_TTL_S, SESSION_IDLE_MS
 //
-// Serve it over HTTPS (a reverse proxy such as Caddy, or a Cloudflare Tunnel) if
-// the page itself is on HTTPS — browsers block mixed content, and the Screen
-// Wake Lock API needs a secure context.
+// Serve it over HTTPS (a reverse proxy such as Caddy in front) if the page
+// itself is on HTTPS — browsers block mixed content, and the Screen Wake Lock
+// API needs a secure context.
 
 import http from "node:http";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { installProxyFetch, parseProxyUrl } from "./outbound.mjs";
 
 function log(...args) {
@@ -46,7 +39,6 @@ function log(...args) {
 }
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const WORKER = path.join(HERE, "..", "proxy", "worker.js");
 const STATE_DIR = path.resolve(process.env.STATE_DIR || path.join(HERE, ".state"));
 const CACHE_DIR = path.join(STATE_DIR, "lyrics-cache");
 const STATE_FILE = path.join(STATE_DIR, "session.json");
@@ -57,7 +49,7 @@ fs.mkdirSync(CACHE_DIR, { recursive: true });
 // --- outbound proxy --------------------------------------------------------
 // Optional: route everything this process sends (the lyrics API and Spotify's
 // token endpoints alike) through a SOCKS5 or HTTP CONNECT proxy. Installed
-// before worker.js is imported so no outbound call can take the direct path.
+// before proxy.mjs is imported so no outbound call can take the direct path.
 // Deliberately NOT read from HTTPS_PROXY / HTTP_PROXY. Those are commonly set
 // on a machine for unrelated reasons (apt, curl, a corporate setup), and picking
 // them up silently would reroute this process's traffic — Spotify tokens
@@ -73,153 +65,98 @@ if (proxyVar) {
   installProxyFetch(outboundProxy, () => {});
 }
 
-// --- `caches.default` ------------------------------------------------------
-// The Worker stores lyric bodies keyed by a synthetic URL, with a max-age. Same
-// contract here, backed by memory + disk so a restart doesn't re-query the API
-// for every song you've already played.
+const { createProxy } = await import("./proxy.mjs");
+
+// --- lyric cache -----------------------------------------------------------
+// Memory in front of disk, so a restart doesn't re-query the API for every song
+// you have already played. Lyrics don't change, so the only expiry is the TTL
+// the proxy asks for.
 
 const MEM_CACHE_MAX = 500;
-const mem = new Map(); // key -> { expires, contentType, body: Buffer }
+const mem = new Map(); // id -> { expires, contentType, body: Buffer }
 
-const cacheFile = (key) =>
-  path.join(CACHE_DIR, crypto.createHash("sha256").update(key).digest("hex") + ".json");
+const cacheFile = (id) =>
+  path.join(CACHE_DIR, crypto.createHash("sha256").update(id).digest("hex") + ".json");
 
-function memSet(key, entry) {
-  mem.set(key, entry);
+function memSet(id, entry) {
+  mem.set(id, entry);
   if (mem.size > MEM_CACHE_MAX) mem.delete(mem.keys().next().value);
 }
 
-const cacheShim = {
-  async match(request) {
-    const key = typeof request === "string" ? request : request.url;
-    let entry = mem.get(key);
+const cache = {
+  async match(id) {
+    let entry = mem.get(id);
     if (!entry) {
       try {
-        const raw = JSON.parse(await fsp.readFile(cacheFile(key), "utf8"));
+        const raw = JSON.parse(await fsp.readFile(cacheFile(id), "utf8"));
         entry = {
           expires: raw.expires,
           contentType: raw.contentType,
           body: Buffer.from(raw.body, "base64"),
         };
-        memSet(key, entry);
+        memSet(id, entry);
       } catch {
         return undefined;
       }
     }
     if (Date.now() > entry.expires) {
-      mem.delete(key);
-      fsp.rm(cacheFile(key), { force: true }).catch(() => {});
+      mem.delete(id);
+      fsp.rm(cacheFile(id), { force: true }).catch(() => {});
       return undefined;
     }
-    return new Response(entry.body, { headers: { "Content-Type": entry.contentType } });
+    return { buf: entry.body, contentType: entry.contentType };
   },
 
-  async put(request, response) {
-    const key = typeof request === "string" ? request : request.url;
-    const maxAge = Number(/max-age=(\d+)/.exec(response.headers.get("Cache-Control") || "")?.[1] ?? 0);
-    if (!maxAge) return;
-    const contentType = response.headers.get("Content-Type") || "application/json";
-    const body = Buffer.from(await response.arrayBuffer());
-    const entry = { expires: Date.now() + maxAge * 1000, contentType, body };
-    memSet(key, entry);
+  async put(id, { buf, contentType, ttl }) {
+    if (!ttl) return;
+    const body = Buffer.from(buf);
+    const entry = {
+      expires: Date.now() + ttl * 1000,
+      contentType: contentType || "application/json",
+      body,
+    };
+    memSet(id, entry);
     await fsp
       .writeFile(
-        cacheFile(key),
-        JSON.stringify({ expires: entry.expires, contentType, body: body.toString("base64") })
+        cacheFile(id),
+        JSON.stringify({
+          expires: entry.expires,
+          contentType: entry.contentType,
+          body: body.toString("base64"),
+        })
       )
       .catch(() => {});
   },
 };
 
-globalThis.caches = { default: cacheShim };
+// --- hub state -------------------------------------------------------------
+// A JSON file, written at most every 200ms: the hub saves on every counter
+// bump, and none of it is worth an fsync per lyric lookup.
 
-// --- Durable Object runtime ------------------------------------------------
-// One process means one instance, which is the guarantee the Durable Object was
-// there to provide in the first place. Storage is a JSON file so the shared
-// session and its counters survive a restart; the alarm is a timer.
+let writeTimer = null;
+let pendingState = null;
 
-const workerModule = await import(pathToFileURL(WORKER).href);
-const { SpicySession } = workerModule;
-const worker = workerModule.default;
-
-function loadState() {
-  try {
-    return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
-  } catch {
-    return {};
-  }
-}
-
-const persisted = loadState();
-let alarmTimer = null;
-let alarmAt = persisted.__alarmAt ?? null;
-let writeQueued = false;
-
-const storage = new Map(Object.entries(persisted.data || {}));
-
-function persist() {
-  if (writeQueued) return;
-  writeQueued = true;
-  setTimeout(() => {
-    writeQueued = false;
-    const out = { __alarmAt: alarmAt, data: Object.fromEntries(storage) };
-    fsp.writeFile(STATE_FILE, JSON.stringify(out)).catch(() => {});
-  }, 200).unref?.();
-}
-
-function armAlarm() {
-  if (alarmTimer) clearTimeout(alarmTimer);
-  alarmTimer = null;
-  if (alarmAt === null) return;
-  const delay = Math.max(0, alarmAt - Date.now());
-  alarmTimer = setTimeout(() => {
-    alarmAt = null;
-    persist();
-    instance.alarm().catch((err) => log("alarm failed", err));
-  }, delay);
-  alarmTimer.unref?.();
-}
-
-const doState = {
-  storage: {
-    get: async (k) => storage.get(k),
-    put: async (k, v) => {
-      storage.set(k, v);
-      persist();
-    },
-    delete: async (k) => {
-      storage.delete(k);
-      persist();
-    },
-    getAlarm: async () => alarmAt,
-    setAlarm: async (t) => {
-      alarmAt = t;
-      persist();
-      armAlarm();
-    },
-    deleteAlarm: async () => {
-      alarmAt = null;
-      persist();
-      armAlarm();
-    },
+const store = {
+  async load() {
+    try {
+      return JSON.parse(await fsp.readFile(STATE_FILE, "utf8"));
+    } catch {
+      return undefined;
+    }
   },
-  blockConcurrencyWhile: (fn) => fn(),
-  waitUntil: (p) => Promise.resolve(p).catch(() => {}),
+  async save(state) {
+    pendingState = state;
+    if (writeTimer) return;
+    writeTimer = setTimeout(() => {
+      writeTimer = null;
+      const out = JSON.stringify(pendingState);
+      fsp.writeFile(STATE_FILE, out).catch((err) => log("state write failed", err));
+    }, 200);
+    writeTimer.unref?.();
+  },
 };
 
-const env = { ...process.env };
-const instance = new SpicySession(doState, env);
-
-// The Worker reaches its hub through `env.SESSION`; in-process that is a direct
-// call to the one instance.
-env.SESSION = {
-  idFromName: (name) => name,
-  get: () => ({ fetch: (url, init) => instance.fetch(new Request(url, init)) }),
-};
-
-const ctx = { waitUntil: (p) => Promise.resolve(p).catch(() => {}) };
-
-armAlarm();
+const proxy = createProxy({ env: process.env, cache, store });
 
 // --- HTTP server -----------------------------------------------------------
 
@@ -264,9 +201,8 @@ const server = http.createServer(async (req, res) => {
       body: body && body.length ? body : undefined,
     });
 
-    const out = await worker.fetch(request, env, ctx);
-    const headers = Object.fromEntries(out.headers);
-    res.writeHead(out.status, headers);
+    const out = await proxy.fetch(request);
+    res.writeHead(out.status, Object.fromEntries(out.headers));
     res.end(Buffer.from(await out.arrayBuffer()));
   } catch (err) {
     log("request failed", err);
@@ -292,6 +228,7 @@ server.listen(PORT, () => {
 for (const sig of ["SIGINT", "SIGTERM"]) {
   process.on(sig, () => {
     log(`${sig} — shutting down`);
+    proxy.hub.stop();
     server.close(() => process.exit(0));
   });
 }

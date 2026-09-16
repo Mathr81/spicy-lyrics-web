@@ -1,0 +1,58 @@
+# Run the proxy on a VPS or home server:
+#
+#   cd web/server
+#   cp .env.example .env     # put your sp_dc cookie in it
+#   docker compose up -d
+#
+# Then point the web app at it: build with
+# VITE_LYRICS_API=https://lyrics.example.com (see web/README.md).
+#
+# One container, no dependencies, no database. The image is node:22-alpine plus
+# three source files; at rest the proxy holds a session token and a few counters.
+
+services:
+  proxy:
+    build: .
+    image: spicy-lyrics-proxy
+    container_name: spicy-lyrics-proxy
+    restart: unless-stopped
+
+    # Bound to localhost by default. This proxy speaks to the API as *your*
+    # Spotify account (that is what SP_DC buys), so it is not something to leave
+    # open to the internet — put a TLS reverse proxy in front of it and let that
+    # be the public face. To expose it directly anyway, set BIND=0.0.0.0 in .env.
+    ports:
+      - "${BIND:-127.0.0.1}:${HOST_PORT:-8787}:8787"
+
+    env_file: .env
+
+    # The session and the lyric cache. Losing it costs one re-fetch per song,
+    # nothing more, but keeping it means a restart is free.
+    volumes:
+      - state:/state
+
+    # Nothing is written outside /state, so the rest of the filesystem can be
+    # read-only — one less thing a compromised dependency could touch (there are
+    # no dependencies, but the proxy does parse network input).
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    # Small by nature: idle it sits around 60-80 MB RSS. The limit is a
+    # backstop against a leak eating a small VPS, not a tuning knob.
+    mem_limit: 192m
+    pids_limit: 128
+
+    # Without this a long-running container's logs grow until the disk is full.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  state:

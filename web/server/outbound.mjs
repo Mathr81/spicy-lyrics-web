@@ -1,7 +1,7 @@
 // Route the proxy's own outgoing requests through an upstream proxy.
 //
 // The Spicy Lyrics proxy makes two kinds of outbound call — the lyrics API and
-// Spotify's token endpoints — and both are plain `fetch()` inside worker.js.
+// Spotify's token endpoints — and both are plain `fetch()` inside proxy.mjs.
 // Node's global fetch has no proxy support that reaches SOCKS5, so when a proxy
 // is configured we swap `globalThis.fetch` for one that dials through it.
 //

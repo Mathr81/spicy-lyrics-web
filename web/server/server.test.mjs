@@ -1,9 +1,9 @@
-// End-to-end test for the standalone Node host — run with `npm test`.
+// End-to-end test for the Node host — run with `npm test`.
 //
-// worker.test.mjs proves the proxy's logic with hand-written stubs. This proves
-// the *host*: that the real server.mjs shims (caches.default backed by
-// memory+disk, Durable Object storage backed by a JSON file, alarms backed by
-// timers) actually satisfy what worker.js asks of them, over real HTTP.
+// proxy.test.mjs proves the proxy's logic against in-memory stubs. This proves
+// the *host*: that the real lyric cache (memory in front of disk) and the real
+// state file satisfy what proxy.mjs asks of them, over real HTTP, across a
+// restart, and through an outbound SOCKS5 proxy.
 //
 //   node server.test.mjs
 
@@ -109,7 +109,7 @@ const q = (body) =>
 const sessionOp = (operation) => ({ queries: [{ operationId: "0", operation, variables: {} }] });
 const lyricsOp = (id) => ({
   queries: [{ operationId: "0", operation: "lyrics", variables: { id, auth: "SpicyLyrics-WebAuth" } }],
-  client: { version: "6.3.12" },
+  client: { version: "6.3.20" },
 });
 
 let host = startHost();

@@ -8,7 +8,7 @@ name: Deploy web to GitHub Pages
 #        VITE_SPOTIFY_CLIENT_ID     your Spotify app Client ID
 #        VITE_SPOTIFY_REDIRECT_URI  your Pages URL, e.g.
 #                                   https://<user>.github.io/<repo>/  (trailing slash!)
-#        VITE_LYRICS_API            (optional) your Cloudflare Worker proxy URL
+#        VITE_LYRICS_API            (optional) your proxy's URL (see web/server/)
 #   3. Add that same VITE_SPOTIFY_REDIRECT_URI as a Redirect URI in your Spotify app.
 
 on:

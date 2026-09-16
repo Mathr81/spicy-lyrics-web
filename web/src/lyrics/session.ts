@@ -11,7 +11,7 @@
 // with backoff, and lyric fetching works regardless of session state. The
 // session-creating ops (`createSession`/`refreshSession`) are authorized by the
 // `Authorization` header, which a browser can't set — the bundled Worker proxy
-// injects it (see web/proxy/worker.js), so this only establishes a real session
+// injects it (see web/server/proxy.mjs), so this only establishes a real session
 // when LYRICS_API points at that proxy. Without it the calls fail harmlessly.
 //
 // Through the proxy these ops never reach the API: the Worker owns ONE upstream

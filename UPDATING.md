@@ -79,9 +79,9 @@ bun run web:preview  # smoke-test the lyrics render, sync, controls
   controls misbehave)? An interface a shim implements probably changed — open the
   matching file in `web/src/shim/` and realign it with the new upstream module.
 - **New API version?** If upstream bumps the API/client version (see
-  `project/config.ts` → `ProjectVersion`, currently `6.2.3`), match it in
+  `project/config.ts` → `ProjectVersion`, currently `6.3.20`), match it in
   `web/src/config.ts` (`CLIENT_VERSION`) and, if the lyrics API changed its
-  session/query protocol, in `web/src/lyrics/` and `web/proxy/worker.js`.
+  session/query protocol, in `web/src/lyrics/` and `web/server/proxy.mjs`.
 
 ## Finish
 
@@ -90,5 +90,5 @@ git push -u origin update/upstream-sync
 ```
 
 Open a PR from `update/upstream-sync` into your `main`, let the GitHub Pages build
-run, confirm the deployed site still works, then merge. If you changed
-`web/proxy/worker.js`, redeploy the Worker too (`cd web/proxy && npx wrangler deploy`).
+run, confirm the deployed site still works, then merge. If you changed anything in
+`web/server/`, redeploy the proxy too (`cd web/server && docker compose up -d --build`).

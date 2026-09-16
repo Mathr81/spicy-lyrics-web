@@ -122,35 +122,31 @@ headers a browser **cannot** set from a web page — `Origin`, `Referer` and
 send CORS headers for your hosting origin. So a direct browser call can be
 rejected.
 
-The fix is the included **Cloudflare Worker proxy** (`web/proxy/`), which injects
-the expected headers server-side and adds permissive CORS:
+The fix is the included **proxy** (`web/server/`), which injects the expected
+headers server-side and adds permissive CORS. It is a plain Node process — one
+container, no dependencies, no database — so it runs on any VPS or home server:
 
 ```bash
-cd web/proxy
-npm install             # isolated: uses web/proxy/package.json, not the repo root
-npx wrangler login      # first time only — opens the browser
-npx wrangler secret put SP_DC   # (recommended) see "Synced lyrics" below
-npx wrangler deploy     # prints https://spicy-lyrics-proxy.<you>.workers.dev
+cd web/server
+cp .env.example .env     # put your sp_dc cookie in it (see "Synced lyrics")
+docker compose up -d     # listens on 127.0.0.1:8787
 ```
 
-> Run these **inside `web/proxy/`** (it has its own `package.json`). Running
-> wrangler from the repo root fails with `npm error EOVERRIDE` because the root
-> `package.json` is a bun project with an `overrides` field npm rejects.
-> No local install at all? Use the Cloudflare dashboard instead: Workers & Pages
-> → Create Worker → paste `web/proxy/worker.js` → Deploy.
-
-Then set `VITE_LYRICS_API` to that Worker URL (as a GitHub Actions Variable, or
-in your local build env) and rebuild. The page will send its requests through the
-Worker, which forwards them to `api.spicylyrics.org` with:
+Then set `VITE_LYRICS_API` to the proxy's public URL (as a GitHub Actions
+Variable, or in your local build env) and rebuild. The page will send its
+requests through the proxy, which forwards them to `api.spicylyrics.org` with:
 
 - `Origin: https://xpui.app.spotify.com`
 - `Referer: https://xpui.app.spotify.com/`
 - a Spotify-client `User-Agent`
-- `SpicyLyrics-Version` (the `CLIENT_VERSION` var, `6.3.12` by default)
+- `SpicyLyrics-Version` (the `CLIENT_VERSION` var, `6.3.20` by default)
 
 and passes your `SpicyLyrics-WebAuth` Bearer token straight through (never logged
-or stored). Any equivalent serverless function (Vercel/Netlify) works too — just
-mirror `web/proxy/worker.js`.
+or stored).
+
+> Do not host it on Cloudflare Workers: the API's WAF refuses requests coming
+> from there (see "If the API blocks the proxy"). That is why this runs on an
+> ordinary machine.
 
 > If `api.spicylyrics.org` happens to allow your origin directly, you can skip the
 > proxy and leave `VITE_LYRICS_API` unset — but the proxy is the reliable path.
@@ -162,31 +158,29 @@ Left alone, every browser does that for itself: four devices means four sessions
 four ping loops and four identical lyric lookups for the same song — the exact
 traffic shape that gets a client rate-limited.
 
-The Worker collapses all of it into one upstream identity:
+The proxy collapses all of it into one upstream identity:
 
 | From the browsers | Reaches `api.spicylyrics.org` |
 |---|---|
-| `createSession` / `refreshSession` / `ping` / `pingConfig`, per device | nothing — answered by the Worker, which owns **one** shared session |
+| `createSession` / `refreshSession` / `ping` / `pingConfig`, per device | nothing — answered by the proxy, which owns **one** shared session |
 | the shared session's keep-alive | one ping loop, on the API's own schedule, regardless of device count |
 | 4 devices starting the same song at once | **1** lyric request (in-flight coalescing) |
-| that song, ever again | **0** — served from the edge cache for 7 days |
+| that song, ever again | **0** — served from the local cache for 7 days |
 | nobody listening for 30 min | **0** — the shared session is dropped, not pinged forever |
 
-The shared session lives in a Durable Object, so "one" holds across colos and
-isolates rather than per-isolate. Without a Durable Object binding (a
-paste-into-the-dashboard deploy) the Worker falls back to per-isolate sharing on
-its own — same behaviour, weaker guarantee.
+One process is one hub, so "one session for every device" is simply what running
+it gets you. The session, its keep-alive schedule and the lyric cache are all
+persisted, so restarting the container costs nothing upstream.
 
 Browsers still run their own session loop, but through the proxy it is local and
-free: the Worker answers with a proxy-local token and a 15-minute ping interval,
+free: the proxy answers with a proxy-local token and a 15-minute ping interval,
 and the page parks that timer entirely while it's in the background.
 
 Check what is actually going out:
 
 ```
-GET https://<your-worker>.workers.dev/__spicy/stats
+GET http://<your-proxy>/__spicy/stats
 {
-  "mode": "durable-object",
   "sessionOpen": true,
   "stats": { "clientOps": 47, "createSession": 1, "ping": 3, "lyricsUpstream": 6, ... }
 }
@@ -195,24 +189,24 @@ GET https://<your-worker>.workers.dev/__spicy/stats
 `clientOps` is what the devices asked for; `ping` + `lyricsUpstream` is what was
 forwarded. The gap is the point.
 
-Logs are on (`[observability]` in `wrangler.toml`) — dashboard → Workers →
-`spicy-lyrics-proxy` → Logs, or `npm run tail`. Filter on `evt`: `upstream` (a
-call that really left), `cache` (`hit` / `coalesced` / `miss`),
-`session_op_local`, `session_opened` / `session_dropped`. Set `LOG_LEVEL` to
-`debug` in `wrangler.toml` to also see cache hits and per-device session ops.
+Logs are one JSON object per line on stdout (`docker compose logs -f`). Filter on
+`evt`: `upstream` (a call that really left), `cache` (`hit` / `coalesced` /
+`miss`), `session_op_local`, `session_opened` / `session_dropped`. Set
+`LOG_LEVEL=debug` in `.env` to also see cache hits and per-device session ops.
 
-Everything tunable lives in `[vars]` in `web/proxy/wrangler.toml` (cache TTLs,
-the client ping interval, the idle timeout, `LOG_LEVEL`, `CLIENT_VERSION`) — no
-code change to adjust any of it. `npm test` inside `web/proxy/` runs an offline
-smoke test that asserts the "4 devices → 1 request" behaviour.
+Everything tunable is an environment variable (cache TTLs, the client ping
+interval, the idle timeout, `LOG_LEVEL`, `CLIENT_VERSION`) — `.env.example` lists
+them all. `npm test` inside `web/server/` runs offline tests that assert the
+"4 devices → 1 request" behaviour, end to end and across a restart.
 
 ### If the API blocks the proxy
 
 `api.spicylyrics.org` sits behind Cloudflare and its WAF can refuse traffic
 outright — including, as of this writing, requests coming from Cloudflare
-Workers. The symptom is a Cloudflare "Sorry, you have been blocked" HTML page
-where an API response should be, for *every* operation, so nothing loads and the
-shared session never opens.
+Workers, which is why this proxy runs on an ordinary machine instead. The symptom
+is a Cloudflare "Sorry, you have been blocked" HTML page where an API response
+should be, for *every* operation, so nothing loads and the shared session never
+opens.
 
 The proxy names this rather than letting it look like a lyrics error:
 
@@ -224,7 +218,7 @@ The proxy names this rather than letting it look like a lyrics error:
   parser.
 
 To confirm it is the network path and not your setup, send the same request from
-an ordinary machine — if that returns 200 and the Worker gets 403, the request
+a different machine — if that returns 200 while the proxy gets 403, the request
 shape is fine and the hosting location is what is being refused:
 
 ```bash
@@ -232,7 +226,7 @@ curl -s -X POST https://api.spicylyrics.org/query \
   -H 'Content-Type: application/json' \
   -H 'Origin: https://xpui.app.spotify.com' \
   -H 'Referer: https://xpui.app.spotify.com/' \
-  -H 'SpicyLyrics-Version: 6.3.12' -H 'X-mode: 2' \
+  -H 'SpicyLyrics-Version: 6.3.20' -H 'X-mode: 2' \
   -d '{"queries":[{"operationId":"0","operation":"pingConfig","variables":{}}]}'
 ```
 
@@ -242,20 +236,40 @@ cookie is not the problem.
 The API's own response carries this notice: *"Access is granted solely for
 personal, individual use through official Spicy Lyrics clients or their public
 forks of official repositories."* Personal use through a fork is what this build
-is; the sensible fixes are to run the proxy from an ordinary machine (see below)
-or to ask the Spicy Lyrics maintainers. Do not try to defeat the block by
-rotating addresses or disguising the client.
+is; the sensible fixes are to move the proxy to a different machine or network
+path (`PROXY_URL`, below) or to ask the Spicy Lyrics maintainers. Do not try to
+defeat the block by rotating addresses or disguising the client.
 
-## Running the proxy outside Cloudflare (`web/server/`)
+## Running the proxy (`web/server/`)
 
-`web/server/server.mjs` runs **the same `web/proxy/worker.js`**, unmodified, on
-plain Node — on a VPS, a home server or in a container. It is not a second
-implementation: Node 20 already provides `fetch`/`Request`/`Response`/
-`crypto.subtle`, so the host only supplies the two things Workers adds — a
-`caches.default` (memory + disk, so the 7-day lyric cache survives a restart) and
-a Durable Object runtime (one process is one instance, with storage in a JSON
-file and the keep-alive alarm on a timer). The shared session, the coalescing and
-the TOTP token minting therefore cannot drift between the two hosts.
+Two files: `proxy.mjs` is the logic (CORS, the minted web-player token, the
+shared session, coalescing) and `server.mjs` is the HTTP server plus the disk
+behind it — the lyric cache (memory in front of disk, so the 7-day cache survives
+a restart) and the hub's state in a JSON file. No dependencies at all: Node 20+
+already provides `fetch`, `Request`/`Response` and `crypto.subtle`.
+
+### Docker Compose (recommended)
+
+```bash
+cd web/server
+cp .env.example .env     # SP_DC at minimum
+docker compose up -d
+docker compose logs -f   # one JSON line per event
+```
+
+The image is `node:22-alpine` plus three source files — nothing to install, so it
+builds in seconds and idles around 60–80 MB. The compose service runs read-only
+with all capabilities dropped, caps its own logs, and keeps the session and lyric
+cache in a named volume so restarts and upgrades cost nothing upstream.
+
+It publishes to **`127.0.0.1:8787` by default**, not `0.0.0.0`. The proxy talks
+to the API as *your* Spotify account, so the intended shape is a TLS reverse
+proxy in front of it (see below) rather than an open port. Set `BIND=0.0.0.0` in
+`.env` if you really want it exposed directly.
+
+Updating: `git pull && docker compose up -d --build`.
+
+### Without Docker
 
 ```bash
 cd web/server
@@ -263,21 +277,14 @@ SP_DC='<your sp_dc cookie>' node server.mjs      # listens on :8787
 npm test                                          # offline end-to-end tests
 ```
 
-Docker (from the repo root) or systemd:
+`web/server/spicy-lyrics-proxy.service` is a hardened systemd unit for the same
+thing; put `SP_DC` in a `systemctl edit` drop-in rather than in the unit itself.
 
-```bash
-docker build -f web/server/Dockerfile -t spicy-lyrics-proxy .
-docker run -d --name spicy-lyrics-proxy -p 8787:8787 \
-  -e SP_DC='<your sp_dc cookie>' -v spicy-proxy-state:/state \
-  --restart unless-stopped spicy-lyrics-proxy
-```
+### Configuration
 
-`web/server/spicy-lyrics-proxy.service` is a hardened unit file; put `SP_DC` in a
-`systemctl edit` drop-in rather than in the unit itself.
-
-Configuration is the same names as the Worker's `[vars]`, read from the
-environment: `SP_DC`, `PORT` (8787), `STATE_DIR` (`./.state`), `LOG_LEVEL`,
-`CLIENT_VERSION`, `LYRICS_CACHE_TTL`, `LYRICS_MISS_CACHE_TTL`,
+All from the environment (and so from `.env` under compose): `SP_DC`, `PORT`
+(8787), `STATE_DIR` (`/state` in the container, `./.state` otherwise),
+`LOG_LEVEL`, `CLIENT_VERSION`, `LYRICS_CACHE_TTL`, `LYRICS_MISS_CACHE_TTL`,
 `CLIENT_PING_INTERVAL_MS`, `CLIENT_SESSION_TTL_S`, `SESSION_IDLE_MS`, and
 `API_ORIGIN` if you ever need to point it at a mirror.
 
@@ -306,8 +313,9 @@ The startup log always states where outbound traffic goes, and a proxy that
 cannot be reached fails the request rather than quietly falling back to a direct
 connection.
 
-In Docker, `127.0.0.1` is the *container*, not your host. Use `--network host`,
-or `--add-host=host.docker.internal:host-gateway` with
+In Docker, `127.0.0.1` is the *container*, not your host. To reach a tunnel
+running on the host, add `extra_hosts: ["host.docker.internal:host-gateway"]` to
+the service in `compose.yaml` and set
 `PROXY_URL=socks5://host.docker.internal:1080`.
 
 No dependency was added for this: `web/server/outbound.mjs` implements the
@@ -320,9 +328,15 @@ Then set `VITE_LYRICS_API` to the host's URL and rebuild the page.
 > **Serve it over HTTPS.** If the page is on HTTPS (GitHub Pages) and the proxy
 > is on plain `http://`, the browser blocks the request as mixed content and
 > nothing loads. Put [Caddy](https://caddyserver.com/) (automatic certificates)
-> or a Cloudflare Tunnel in front. A tunnel is a good fit for a home server with
-> no public address — it only handles traffic *in*; requests to the lyrics API
-> still leave from your own connection, which is the point of moving off Workers.
+> in front — with the default `127.0.0.1` binding that is also what makes the
+> proxy reachable at all. Two lines of Caddyfile are enough:
+>
+> ```
+> lyrics.example.com {
+>     reverse_proxy 127.0.0.1:8787
+> }
+> ```
+>
 > The Screen Wake Lock also needs a secure context, so HTTPS is required for the
 > iPad to stay awake.
 
@@ -340,11 +354,13 @@ account cookie `sp_dc`, server-side:
 1. Log in to <https://open.spotify.com> in your browser.
 2. DevTools → **Application → Cookies → https://open.spotify.com** → copy the
    value of the **`sp_dc`** cookie (a long string).
-3. Store it as a Worker secret (it never reaches the browser, never gets logged):
+3. Put it in `web/server/.env` as `SP_DC=...` (that file is git-ignored). It
+   stays server-side: it never reaches the browser and is never logged.
    ```bash
-   cd web/proxy
-   npx wrangler secret put SP_DC   # paste the value when prompted
-   npx wrangler deploy
+   cd web/server
+   cp .env.example .env
+   $EDITOR .env
+   docker compose up -d
    ```
 
 `sp_dc` is long-lived (months) — treat it like a password. If lyrics go back to
@@ -354,12 +370,12 @@ text-only, the cookie has expired; repeat the steps.
 
 Spotify mints the web-player token via `/api/token`, guarded by a **TOTP** (a
 time-based code, RFC 6238, from a per-version "secret cipher" + a version number
-`totpVer`). The Worker implements exactly what the web player / librespot do
+`totpVer`). The proxy implements exactly what the web player / librespot do
 (TOTP verified against the RFC 6238 test vectors, key derived by XORing the
 cipher bytes with `(i % 33) + 9`).
 
 Spotify **rotates the cipher and bumps `totpVer`** to deter scraping, so the
-Worker **auto-updates**: it fetches the community-maintained cipher list
+proxy **auto-updates**: it fetches the community-maintained cipher list
 ([`xyloflake/spot-secrets-go`](https://github.com/xyloflake/spot-secrets-go))
 and uses the highest version (falling back to a baked-in copy, then to any older
 version that still works). No code change needed across most rotations.
@@ -367,13 +383,13 @@ version that still works). No code change needed across most rotations.
 Verify minting works (never exposes the token):
 
 ```
-GET https://<your-worker>.workers.dev/__spicy/tokencheck
+GET http://<your-proxy>/__spicy/tokencheck
 → { "ok": true, "totpVer": "61" }        # good
 → { "ok": false, "reason": "..." }        # cookie expired or secret rotated
 ```
 
-Manual overrides (rarely needed) via Worker env: `TOTP_SECRET` (a digit-string
-key), `TOTP_VER`, `SECRET_DICT_URL`, or `DISABLE_SECRET_FETCH=1`.
+Manual overrides (rarely needed), as environment variables: `TOTP_SECRET` (a
+digit-string key), `TOTP_VER`, `SECRET_DICT_URL`, or `DISABLE_SECRET_FETCH=1`.
 
 ## How it works (architecture)
 
