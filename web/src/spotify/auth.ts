@@ -149,6 +149,30 @@ async function refresh(refreshToken: string): Promise<StoredToken | null> {
   return readStored();
 }
 
+/**
+ * Report that the API refused the current access token with a 401.
+ *
+ * Mirrors `Platform.InvalidateSpotifyAccessToken` in the extension. There the
+ * platform keeps handing the same string back until it rotates, so the token has
+ * to be remembered as rejected; here the only source is our own stored token, so
+ * "reject it" is simply "treat it as expired" — the next `getAccessToken()` then
+ * takes the refresh path instead of returning the string the API just refused.
+ *
+ * Passing the token that failed makes this a no-op if a refresh already replaced
+ * it, so a late 401 from an in-flight request can't discard a newer token.
+ */
+export function invalidateAccessToken(token?: string): void {
+  const stored = readStored();
+  if (!stored) return;
+  if (token && stored.accessToken !== token) return;
+  if (!stored.refreshToken) {
+    // Nothing to refresh with: the only honest state is logged out.
+    logout();
+    return;
+  }
+  writeStored({ ...stored, expiresAt: 0 });
+}
+
 let inflightRefresh: Promise<string | null> | null = null;
 
 /** Return a valid access token, refreshing if it's within 60s of expiry. */

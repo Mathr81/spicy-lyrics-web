@@ -3,7 +3,7 @@
 // real SLObjPack unpacker from the engine.
 import { SLObjPack } from "@src/utils/objpack.ts";
 import { LYRICS_API, CLIENT_VERSION } from "../config.ts";
-import { getAccessToken } from "../spotify/auth.ts";
+import { getAccessToken, invalidateAccessToken } from "../spotify/auth.ts";
 
 const packer = new SLObjPack();
 
@@ -51,6 +51,38 @@ function writePersisted(trackId: string, data: any): void {
   }
 }
 
+/** The result of our single query in a `/query` envelope. */
+function pickResult(json: any): any {
+  return json?.queries?.find((q: any) => q.operationId === "0")?.result ?? json?.queries?.[0]?.result;
+}
+
+/** One `/query` call for a track's lyrics with the given bearer token. */
+async function queryLyrics(trackId: string, token: string): Promise<Response> {
+  return fetch(`${LYRICS_API}/query`, {
+    method: "POST",
+    // Note: browsers forbid setting `Origin`, `Referer` and `User-Agent` from
+    // fetch. If the API requires the Spotify-client values for those, route
+    // LYRICS_API through the bundled proxy (web/server/), which injects them
+    // server-side. These are the headers we CAN set from the page.
+    headers: {
+      Accept: "*/*",
+      "Content-Type": "application/json",
+      "SpicyLyrics-Version": CLIENT_VERSION,
+      "X-mode": "2",
+      "SpicyLyrics-WebAuth": `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      queries: [
+        {
+          operation: "lyrics",
+          variables: { id: trackId, auth: "SpicyLyrics-WebAuth" },
+        },
+      ],
+      client: { version: CLIENT_VERSION },
+    }),
+  });
+}
+
 export async function fetchLyrics(trackId: string): Promise<LyricsResult> {
   if (cache.has(trackId)) return { ok: true, data: cache.get(trackId) };
   const persisted = readPersisted(trackId);
@@ -64,35 +96,13 @@ export async function fetchLyrics(trackId: string): Promise<LyricsResult> {
 
   let res: Response;
   try {
-    res = await fetch(`${LYRICS_API}/query`, {
-      method: "POST",
-      // Note: browsers forbid setting `Origin`, `Referer` and `User-Agent` from
-      // fetch. If the API requires the Spotify-client values for those, route
-      // LYRICS_API through the bundled proxy (web/proxy/), which injects them
-      // server-side. These are the headers we CAN set from the page.
-      headers: {
-        Accept: "*/*",
-        "Content-Type": "application/json",
-        "SpicyLyrics-Version": CLIENT_VERSION,
-        "X-mode": "2",
-        "SpicyLyrics-WebAuth": `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        queries: [
-          {
-            operation: "lyrics",
-            variables: { id: trackId, auth: "SpicyLyrics-WebAuth" },
-          },
-        ],
-        client: { version: CLIENT_VERSION },
-      }),
-    });
+    res = await queryLyrics(trackId, token);
   } catch (err) {
     console.error("[SpicyLyrics] lyrics request failed", err);
     return { ok: false, reason: "error", status: 0 };
   }
 
-  // The bundled Worker proxy sets this when api.spicylyrics.org answered with a
+  // The bundled proxy sets this when api.spicylyrics.org answered with a
   // Cloudflare block page instead of an API response: the request never reached
   // the API, so it is neither a missing-lyrics case nor anything a retry fixes.
   if (res.headers.get("X-Spicy-Upstream") === "blocked") {
@@ -100,10 +110,27 @@ export async function fetchLyrics(trackId: string): Promise<LyricsResult> {
   }
   if (!res.ok) return { ok: false, reason: "error", status: res.status };
 
-  const json = await res.json();
-  const result = json?.queries?.find((q: any) => q.operationId === "0")?.result
-    ?? json?.queries?.[0]?.result;
+  let result = pickResult(await res.json());
   if (!result) return { ok: false, reason: "not-found", status: 404 };
+
+  // The envelope 401: the token we sent was already dead, whatever its stated
+  // expiry said. Retire it and try once more with a fresh one — once only, so a
+  // genuinely unauthorized client can't loop. (Mirrors the extension's
+  // `utils/Lyrics/fetchLyrics.ts`.)
+  if (result.httpStatus === 401) {
+    invalidateAccessToken(token);
+    const retryToken = await getAccessToken();
+    if (retryToken && retryToken !== token) {
+      try {
+        const retry = await queryLyrics(trackId, retryToken);
+        // Keep the original 401 if the retry came back shapeless — it is the
+        // more accurate answer of the two.
+        if (retry.ok) result = pickResult(await retry.json()) ?? result;
+      } catch (err) {
+        console.error("[SpicyLyrics] lyrics retry failed", err);
+      }
+    }
+  }
 
   const status = result.httpStatus;
   if (status === 503) return { ok: false, reason: "queued", status };
