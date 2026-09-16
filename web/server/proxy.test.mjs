@@ -17,11 +17,25 @@ globalThis.fetch = async (url, init) => {
     const op = body.queries[0].operation;
     upstream.calls.push(op);
     if (upstream.blockNext) {
-      return new Response(
-        "<!DOCTYPE html><html><head><title>Attention Required! | Cloudflare</title></head>" +
+      const pages = {
+        // The classic "you have been blocked" interstitial...
+        block:
+          "<!DOCTYPE html><html><head><title>Attention Required! | Cloudflare</title></head>" +
           "<body><h1>Sorry, you have been blocked</h1>Cloudflare Ray ID: deadbeef</body></html>",
-        { status: 403, headers: { "Content-Type": "text/html; charset=UTF-8" } }
-      );
+        // ...and the managed challenge, which names neither Cloudflare nor a
+        // block anywhere near the top. Verbatim shape of what a challenged
+        // address really gets back.
+        challenge:
+          '<!DOCTYPE html><html lang="en-US"><head><title>Just a moment...</title>' +
+          '<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">' +
+          '<meta http-equiv="X-UA-Compatible" content="IE=Edge"><meta name="robots" content="noindex">' +
+          '</head><body class="no-js"><div class="main-wrapper"><h1>www.example.com</h1>' +
+          "<p>Verifying you are human. This may take a few seconds.</p></div></body></html>",
+      };
+      return new Response(pages[upstream.blockNext] ?? pages.block, {
+        status: 403,
+        headers: { "Content-Type": "text/html; charset=UTF-8" },
+      });
     }
     await new Promise((r) => setTimeout(r, 30)); // make coalescing observable
     const data =
@@ -146,7 +160,7 @@ check("stats show client ops >> upstream traffic",
 // 7. An upstream Cloudflare block page is named as such, not passed through as
 //    HTML and not cached.
 {
-  upstream.blockNext = true;
+  upstream.blockNext = "block";
   upstream.calls.length = 0;
   const r = await post(lyricsOp("9ZzBlockedTrack"));
   await settle();
@@ -157,11 +171,38 @@ check("stats show client ops >> upstream traffic",
   const stats2 = await (await proxy.fetch(new Request("https://proxy.test/__spicy/stats"))).json();
   check("upstream block counted in stats", stats2.upstreamBlocked?.count >= 1);
 
-  upstream.blockNext = false;
+  upstream.blockNext = null;
   upstream.calls.length = 0;
   const retry = await post(lyricsOp("9ZzBlockedTrack"));
   await settle();
   check("a block is never cached — the next try goes upstream again",
+    upstream.calls.filter((c) => c === "lyrics").length === 1);
+  check("and then succeeds", (await retry.json()).queries[0].result.data.Type === "Syllable");
+}
+
+// 8. The managed-challenge page ("Just a moment...") is a block too. It carries
+//    none of the words the old detector looked for, so it used to sail through
+//    as raw HTML into the page's JSON parser.
+{
+  upstream.blockNext = "challenge";
+  upstream.calls.length = 0;
+  const r = await post(lyricsOp("8ChallengedTrack"));
+  await settle();
+  const body = await r.clone().text();
+  check("challenge page → 403, not passed through", r.status === 403);
+  check("challenge page flagged as blocked", r.headers.get("X-Spicy-Upstream") === "blocked");
+  check("challenge page never reaches the client as HTML",
+    !body.includes("Just a moment") && JSON.parse(body).error === "upstream-blocked",
+    body.slice(0, 60));
+  const st = await (await proxy.fetch(new Request("https://proxy.test/__spicy/stats"))).json();
+  check("stats name it a challenge, so the operator knows to change exit path",
+    st.upstreamBlocked?.kind === "cloudflare-challenge", String(st.upstreamBlocked?.kind));
+
+  upstream.blockNext = null;
+  upstream.calls.length = 0;
+  const retry = await post(lyricsOp("8ChallengedTrack"));
+  await settle();
+  check("a challenge is never cached either",
     upstream.calls.filter((c) => c === "lyrics").length === 1);
   check("and then succeeds", (await retry.json()).queries[0].result.data.Type === "Syllable");
 }

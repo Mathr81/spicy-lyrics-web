@@ -18,8 +18,14 @@
 #
 # In Nginx Proxy Manager → Proxy Hosts → Add:
 #   Forward Hostname / IP:  spicy-lyrics-proxy
-#   Forward Port:           8787
+#   Forward Port:           8787          <- or whatever PORT you set in .env
 #   (+ request a TLS certificate — the page needs HTTPS, see web/README.md)
+#
+# Changing the port: set PORT=8987 in .env and `docker compose up -d`. Nothing
+# else to edit — the server, the healthcheck and the `expose` below all read it.
+# Then point NPM's Forward Port at the same number. Since no port is published on
+# the host, this only matters if 8787 collides with another container ON THE
+# REVERSE PROXY'S NETWORK; it cannot collide with anything on the host itself.
 
 services:
   proxy:
@@ -31,12 +37,12 @@ services:
     # Reachable only from the reverse proxy's network, on this port. `expose`
     # publishes nothing — it documents the port for whoever reads this file.
     expose:
-      - "8787"
+      - "${PORT:-8787}"
 
     # Not using a reverse proxy in Docker? Uncomment to publish the port on the
     # host instead, and keep the 127.0.0.1 — see the note at the top.
     #ports:
-    #  - "127.0.0.1:8787:8787"
+    #  - "127.0.0.1:${PORT:-8787}:${PORT:-8787}"
 
     networks:
       - reverse-proxy

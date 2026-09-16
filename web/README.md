@@ -208,14 +208,28 @@ is a Cloudflare "Sorry, you have been blocked" HTML page where an API response
 should be, for *every* operation, so nothing loads and the shared session never
 opens.
 
+Two shapes of it, and the difference decides what to do:
+
+| What comes back | `kind` | What it means |
+|---|---|---|
+| `Sorry, you have been blocked` | `cloudflare-block` | the address is on a deny rule |
+| `Just a moment…` / `Verifying you are human` | `cloudflare-challenge` | the address is being challenged — typical for a datacenter/VPS IP |
+
+A challenge cannot be solved server-side (that is the point of it), so the fix is
+to leave from somewhere else: `PROXY_URL` (below) routes the proxy's own outbound
+traffic through a SOCKS5/HTTP proxy on a different network path. Nothing else in
+the setup needs to change.
+
 The proxy names this rather than letting it look like a lyrics error:
 
-- `/__spicy/stats` reports `upstreamBlocked: { count, lastAt }` and
+- `/__spicy/stats` reports `upstreamBlocked: { count, lastAt, kind }` and
   `sessionOpen: false`.
 - The logs carry `evt="upstream_blocked"` at `warn` level.
 - The page shows "L'API Spicy Lyrics refuse les requêtes du proxy" instead of a
   generic failure, and the block page is never cached or handed to the JSON
-  parser.
+  parser. Detection is on the *content type*: the API answers `/query` with JSON
+  always, so any HTML body is something in front of it answering instead. (It
+  used to match on the page's wording, which missed the challenge page entirely.)
 
 To confirm it is the network path and not your setup, send the same request from
 a different machine — if that returns 200 while the proxy gets 403, the request
@@ -272,7 +286,7 @@ container name:
 |---|---|
 | Domain Names | `lyrics.example.com` |
 | Forward Hostname / IP | `spicy-lyrics-proxy` |
-| Forward Port | `8787` |
+| Forward Port | `8787` (or your `PORT`) |
 | SSL | request a certificate — the page needs HTTPS (see below) |
 
 If your reverse proxy's network is named differently, set `PROXY_NETWORK` in
@@ -280,8 +294,15 @@ If your reverse proxy's network is named differently, set `PROXY_NETWORK` in
 lives in (`npm/` → `npm_default`), so check with `docker network ls`. The network
 must already exist — it belongs to the reverse proxy's stack, not to this one.
 
+**Changing the port** (say 8787 already belongs to another container on that
+network): put `PORT=8987` in `.env` and `docker compose up -d`. That is the whole
+change — the server, the Docker healthcheck and compose's `expose` all read it —
+then set the same number as NPM's Forward Port. Since nothing is published on the
+host, the port can only clash with another container on the reverse proxy's
+network, never with something on the machine itself.
+
 Not running a reverse proxy in Docker? Uncomment the `ports:` block in
-`compose.yaml` to publish `127.0.0.1:8787` on the host instead.
+`compose.yaml` to publish it on `127.0.0.1` instead.
 
 Updating: `git pull && docker compose up -d --build`.
 

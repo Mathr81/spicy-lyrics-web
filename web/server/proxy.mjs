@@ -48,8 +48,9 @@ const SPOTIFY_ORIGIN = "https://xpui.app.spotify.com";
 const SPOTIFY_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.179 Spotify/1.2.94.583 Safari/537.36";
 
-// Community-maintained list of per-version TOTP secret ciphers. Auto-updates the
-// Worker when Spotify rotates the secret. Override/disable via env.
+// Community-maintained list of per-version TOTP secret ciphers. Keeps the proxy
+// working when Spotify rotates the secret. Override/disable via env.
+
 const SECRET_DICT_URL =
   "https://raw.githubusercontent.com/xyloflake/spot-secrets-go/main/secrets/secretDict.json";
 
@@ -194,14 +195,35 @@ function blockedLyricsResult() {
   };
 }
 
-function isUpstreamBlock(status, contentType, buf) {
-  if (status !== 403 && status !== 503 && status !== 429) return false;
-  if (!/text\/html/i.test(contentType || "")) return false;
+// The API answers `/query` with JSON — always, including for its own errors. So
+// an HTML body is never the API talking: something in front of it answered
+// instead, and the request did not reach the API.
+//
+// Deliberately NOT matched on the text of the page. An earlier version looked
+// for "Attention Required" / "you have been blocked" / "Cloudflare Ray ID" and
+// missed the managed-challenge page ("Just a moment…"), which carries none of
+// them — so the HTML went straight to the page's JSON parser, which is the one
+// outcome this check exists to prevent. The content type is the reliable
+// signal; the wording is Cloudflare's to change.
+function isUpstreamBlock(contentType) {
+  return /text\/html/i.test(contentType || "");
+}
+
+// Which kind of wall it was, for the log line only. Never a condition: an
+// unrecognised HTML page is still a page instead of an API response.
+function blockKind(buf) {
   try {
     const head = new TextDecoder().decode(buf.slice(0, 4096));
-    return /Attention Required|cf-error|Cloudflare Ray ID|you have been blocked/i.test(head);
+    if (/Just a moment|cf[-_]chl|challenge-platform|Enable JavaScript and cookies/i.test(head)) {
+      return "cloudflare-challenge";
+    }
+    if (/Attention Required|cf-error|you have been blocked/i.test(head)) {
+      return "cloudflare-block";
+    }
+    if (/Cloudflare/i.test(head)) return "cloudflare-other";
+    return "html-page";
   } catch {
-    return false;
+    return "unknown";
   }
 }
 
@@ -500,16 +522,20 @@ export class SessionHub {
 
   // Loud, and at warn level: an operator staring at "lyrics don't load" needs
   // this to be the first thing they see in the logs.
-  noteBlock(op, http) {
+  noteBlock(op, http, kind) {
     this.s.stats.blocked++;
     this.s.lastBlockAt = Date.now();
+    this.s.lastBlockKind = kind;
     this.log("warn", "upstream_blocked", {
       op,
       http,
+      kind,
       detail:
-        "api.spicylyrics.org returned a Cloudflare block page — the request " +
-        "never reached the API. This is an upstream network/WAF decision, not " +
-        "a token or session problem.",
+        "api.spicylyrics.org answered with an HTML page instead of the API — " +
+        "the request never reached it. This is an upstream network/WAF " +
+        "decision, not a token or session problem. A 'cloudflare-challenge' " +
+        "means this machine's address is being challenged: route the proxy's " +
+        "own traffic elsewhere with PROXY_URL.",
     });
   }
 
@@ -540,8 +566,8 @@ export class SessionHub {
         }),
       });
       const raw = await res.arrayBuffer();
-      const blocked = isUpstreamBlock(res.status, res.headers.get("Content-Type"), raw);
-      if (blocked) this.noteBlock(tag, res.status);
+      const blocked = isUpstreamBlock(res.headers.get("Content-Type"));
+      if (blocked) this.noteBlock(tag, res.status, blockKind(raw));
       let result = null;
       if (res.ok && !blocked) {
         try {
@@ -731,8 +757,8 @@ export class SessionHub {
       const contentType = res.headers.get("Content-Type") || "application/json";
       this.s.lastUpstreamAt = Date.now();
 
-      if (isUpstreamBlock(res.status, contentType, buf)) {
-        this.noteBlock("lyrics", res.status);
+      if (isUpstreamBlock(contentType)) {
+        this.noteBlock("lyrics", res.status, blockKind(buf));
         // Never hand a Cloudflare HTML page to the page's JSON parser, and never
         // cache it (only inner-200/404 are cached). Return something the client
         // can name.
@@ -774,6 +800,7 @@ export class SessionHub {
         ? {
             count: this.s.stats.blocked,
             lastAt: this.s.lastBlockAt,
+            kind: this.s.lastBlockKind || null,
             detail:
               "api.spicylyrics.org is returning a Cloudflare block page to " +
               "this proxy. The requests are not reaching the API.",
