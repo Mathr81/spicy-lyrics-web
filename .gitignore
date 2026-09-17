@@ -185,3 +185,9 @@ VOLUME_SLIDER_PLAN.md
 api-backend/
 
 docs/
+
+# Local Docker Compose overrides for the proxy (your own tunnel, ports, mounts).
+# Infrastructure specific to one machine — never the project's business.
+web/server/compose.override.yaml
+web/server/compose.override.yml
+docker-compose.override.yml
