@@ -6,6 +6,7 @@ import {
 } from "@tanstack/virtual-core";
 import { Maid } from "../../modules/Maid.ts";
 import Logger from "../Logger.ts";
+import { isExperimentEnabled } from "../experiments.ts";
 
 // Gap scale factors relative to 1cqw (containerWidth / 100).
 // Gap is baked into each wrapper's padding-bottom so items can have
@@ -23,6 +24,26 @@ const ESTIMATE: Record<string, number> = {
 };
 
 const virtualizerLogger = new Logger("Lyrics Virtualizer");
+
+// --- JS-animated auto-scroll tuning (see _animateScrollToIndex) ----------------
+// Duration scales with distance and is clamped, the way a native smooth scroll's
+// does: a line-to-line move lands near the floor, a page-sized jump near the cap.
+const ANIM_MIN_MS = 220;
+const ANIM_MAX_MS = 650;
+const ANIM_MS_PER_PX = 0.35;
+// A run ends by re-reading its target; if the layout moved it further than this,
+// another (short) run chases it. Bounded so a thrashing layout can't loop forever.
+const ANIM_SETTLE_EPSILON = 1;
+const ANIM_MAX_SETTLE_PASSES = 3;
+// How far scrollTop may drift from what we last wrote before we conclude someone
+// else (a wheel, a finger) has taken over and hand the scroll to them.
+const EXTERNAL_SCROLL_TOLERANCE = 2;
+
+// Ease-out rather than the ease-in-out a native smooth scroll uses: this animation
+// is retargeted every time a new line goes active, often mid-flight, and restarting
+// an ease-in from the current position visibly stalls. Ease-out restarts at full
+// velocity, so a retarget reads as one continuous movement.
+const easeOutCubic = (progress: number): number => 1 - (1 - progress) ** 3;
 
 class LyricsVirtualizer {
   private _virtualizer: Virtualizer<HTMLElement, HTMLElement> | null = null;
@@ -89,6 +110,17 @@ class LyricsVirtualizer {
   // the sole writer of scrollTop and the retry chain's "external scroll" abort only
   // trips on a genuine user scroll.
   private _converging = false;
+
+  // In-flight JS scroll animation (_animateScrollToIndex): its rAF handle and the
+  // last scrollTop we wrote, read back from the element so sub-pixel rounding is
+  // not mistaken for a user scroll on the next frame.
+  private _scrollAnimRAF: ReturnType<typeof requestAnimationFrame> | null = null;
+  private _scrollAnimLastWritten = 0;
+
+  // Whether this instance animates the auto-scroll itself instead of leaning on the
+  // browser's `scroll-behavior: smooth`. Read once at init, like every other
+  // experiment whose markup/behaviour is decided at build time.
+  private _jsScrolling = false;
 
   // Re-entry guard for _onVirtualizerChange. TanStack's resizeItem calls onChange
   // synchronously on a non-zero size delta, so v.measureElement() inside the mount
@@ -314,6 +346,19 @@ class LyricsVirtualizer {
     this._wrappers = new Array(lineElements.length).fill(null);
     this._virtualContainer = virtualContainer;
     this._scrollEl = scrollEl;
+
+    this._jsScrolling = isExperimentEnabled("jsLyricsScrolling");
+    if (this._jsScrolling) {
+      // We write scrollTop frame by frame, so the element must not run the
+      // browser's own scroll animation on top of ours. Simplebar.css locks
+      // `scroll-behavior: smooth !important` on this wrapper, which would animate
+      // every one of those writes a second time — and would animate TanStack's
+      // size-change scroll corrections too. An inline !important declaration is
+      // the only thing that outranks a stylesheet !important, and it keeps the
+      // behaviour tied to the virtualizer rather than to whichever page CSS
+      // happens to be shipped around it.
+      scrollEl.style.setProperty("scroll-behavior", "auto", "important");
+    }
 
     const containerWidth = scrollEl.clientWidth || virtualContainer.clientWidth || 0;
     this._containerWidth = containerWidth;
@@ -682,12 +727,25 @@ class LyricsVirtualizer {
     instant: boolean = false,
     padding: number = 0
   ): void {
+    this._cancelPendingScroll();
+    this._setConverging(true);
+    if (this._jsScrolling && !instant) {
+      this._animateScrollToIndex(index, align, padding, 0);
+      return;
+    }
+    this._scrollToIndexWithRetry(index, align, instant, padding, 0, null);
+  }
+
+  /** Drop any in-flight convergence retry or scroll animation. */
+  private _cancelPendingScroll(): void {
     if (this._scrollVerifyRAF !== null) {
       cancelAnimationFrame(this._scrollVerifyRAF);
       this._scrollVerifyRAF = null;
     }
-    this._setConverging(true);
-    this._scrollToIndexWithRetry(index, align, instant, padding, 0, null);
+    if (this._scrollAnimRAF !== null) {
+      cancelAnimationFrame(this._scrollAnimRAF);
+      this._scrollAnimRAF = null;
+    }
   }
 
   // Toggle convergence mode. While converging we disable TanStack's
@@ -724,47 +782,23 @@ class LyricsVirtualizer {
     return Math.max(0, target + padding);
   }
 
-  private _scrollToIndexWithRetry(
+  /**
+   * Where scrollTop has to land for line `index` to sit at `align`, plus the item
+   * metrics that produced it (the retry path compares those across frames to spot
+   * measurement drift). Recomputed from scratch on every call: `item.start` moves
+   * whenever a line above it mounts and is measured for real.
+   */
+  private _measureTarget(
     index: number,
     align: "start" | "center" | "end" | "auto",
-    instant: boolean,
-    padding: number,
-    retry: number,
-    expectedScrollTop: number | null
-  ): void {
+    padding: number
+  ): { top: number; itemStart: number; itemSize: number } | null {
     const v = this._virtualizer;
-    if (!v || !this._virtualContainer) {
-      this._setConverging(false);
-      return;
-    }
-
-    const scrollEl = v.scrollElement;
-    if (!scrollEl) {
-      this._setConverging(false);
-      return;
-    }
+    const scrollEl = v?.scrollElement;
+    if (!v || !scrollEl || !this._virtualContainer) return null;
 
     const viewportHeight = scrollEl.clientHeight;
-    if (!viewportHeight) {
-      this._setConverging(false);
-      return;
-    }
-
-    // If something else moved the scroll between our last set and this retry
-    // (user scroll, another scrollTo call, etc), abandon the retry chain so we
-    // don't fight whoever took over.
-    if (
-      expectedScrollTop !== null &&
-      Math.abs(scrollEl.scrollTop - expectedScrollTop) > 2
-    ) {
-      virtualizerLogger.debug("Aborting scrollToIndex retry: external scroll detected", {
-        expectedScrollTop,
-        actualScrollTop: scrollEl.scrollTop,
-        retry,
-      });
-      this._setConverging(false);
-      return;
-    }
+    if (!viewportHeight) return null;
 
     let itemStart: number;
     let itemSize: number;
@@ -789,14 +823,230 @@ class LyricsVirtualizer {
     const scrollElRect = scrollEl.getBoundingClientRect();
     const containerOffset = containerRect.top - scrollElRect.top + scrollEl.scrollTop;
 
-    const finalScrollTop = this._computeFinalScrollTop(
+    return {
+      top: this._computeFinalScrollTop(
+        itemStart,
+        itemSize,
+        viewportHeight,
+        containerOffset,
+        align,
+        padding
+      ),
       itemStart,
       itemSize,
-      viewportHeight,
-      containerOffset,
-      align,
-      padding
+    };
+  }
+
+  /**
+   * Wayland quirk: a programmatic scrollTop write may not dispatch a 'scroll' event,
+   * so observeElementOffset never updates scrollOffset and the virtual window stays
+   * pinned to the old position while the DOM scrolled (blank lyrics until a manual
+   * scroll). Push the observed offset in and re-render so the right window mounts
+   * regardless. During an animation this also runs ahead of the scroll event, so the
+   * window tracks the movement in the same frame instead of one behind it.
+   */
+  private _syncVirtualizerOffset(
+    v: Virtualizer<HTMLElement, HTMLElement>,
+    observedScrollTop: number
+  ): void {
+    if (v.scrollOffset == null || Math.abs(v.scrollOffset - observedScrollTop) >= 1) {
+      v.scrollOffset = observedScrollTop;
+      this._onVirtualizerChange(v);
+    }
+  }
+
+  /**
+   * Animate scrollTop to line `index` ourselves, one rAF at a time.
+   *
+   * The browser's own smooth scroll fits this badly on both counts:
+   *
+   * - It cannot be steered. The retry chain below can only re-issue a whole new
+   *   scrollTo as measurements land, and while the native animation is in flight
+   *   its own external-scroll guard reads a moving scrollTop, so a target that is
+   *   still an estimate (any line outside the mounted window) is chased rather than
+   *   converged on. Measured in Chromium, a non-instant scroll 50 lines down lands
+   *   ~680px past its mark and never mounts the line it was aiming at.
+   * - On iOS it is deferred inside the momentum container, which turned every line
+   *   change into a lag-then-jump — so the web build switched it off there outright,
+   *   and lyrics have been hard-jumping line to line on iPad ever since.
+   *
+   * Animating it ourselves fixes both by making the conflict the mechanism: the
+   * target is re-read every frame, so lines mounting underneath the animation bend
+   * its path instead of needing a retry, and no platform's native scroll animator
+   * is involved. TanStack's own scroll adjustment stays disabled for the duration
+   * (`_setConverging`), leaving us the only writer of scrollTop.
+   */
+  private _animateScrollToIndex(
+    index: number,
+    align: "start" | "center" | "end" | "auto",
+    padding: number,
+    settlePass: number
+  ): void {
+    const v = this._virtualizer;
+    const scrollEl = v?.scrollElement;
+    if (!v || !scrollEl) {
+      this._setConverging(false);
+      return;
+    }
+
+    const initial = this._measureTarget(index, align, padding);
+    if (!initial) {
+      this._setConverging(false);
+      return;
+    }
+
+    const from = scrollEl.scrollTop;
+    const distance = Math.abs(this._reachable(scrollEl, initial.top) - from);
+    if (distance < ANIM_SETTLE_EPSILON) {
+      this._setConverging(false);
+      return;
+    }
+
+    const duration = Math.min(
+      ANIM_MAX_MS,
+      Math.max(ANIM_MIN_MS, distance * ANIM_MS_PER_PX)
     );
+    const startedAt = performance.now();
+    this._scrollAnimLastWritten = from;
+
+    virtualizerLogger.debug("scrollToIndex animating", {
+      index,
+      align,
+      padding,
+      settlePass,
+      from: Math.round(from),
+      target: Math.round(initial.top),
+      duration: Math.round(duration),
+    });
+
+    const step = (now: number) => {
+      this._scrollAnimRAF = null;
+      if (this._virtualizer !== v) {
+        this._setConverging(false);
+        return;
+      }
+      if (Math.abs(scrollEl.scrollTop - this._scrollAnimLastWritten) > EXTERNAL_SCROLL_TOLERANCE) {
+        // The virtual container's height moves under us as estimates are replaced
+        // by real measurements, so the browser pulling scrollTop back into range is
+        // our own doing — adopt it. Anything else is a wheel or a finger, and the
+        // reader wins.
+        if (!this._wasClampedIntoRange(scrollEl)) {
+          virtualizerLogger.debug("Aborting scroll animation: external scroll detected", {
+            index,
+            expected: Math.round(this._scrollAnimLastWritten),
+            actual: Math.round(scrollEl.scrollTop),
+          });
+          this._setConverging(false);
+          return;
+        }
+        this._scrollAnimLastWritten = scrollEl.scrollTop;
+      }
+
+      const target = this._measureTarget(index, align, padding);
+      if (!target) {
+        this._setConverging(false);
+        return;
+      }
+
+      const progress = Math.min((now - startedAt) / duration, 1);
+      // Interpolate from the fixed start towards the CURRENT target, so a target
+      // that moved mid-flight is absorbed smoothly and p=1 lands exactly on it.
+      const to = this._reachable(scrollEl, target.top);
+      const next = progress >= 1 ? to : from + (to - from) * easeOutCubic(progress);
+
+      scrollEl.scrollTop = next;
+      // Read back rather than trusting `next`: the browser rounds to device pixels
+      // and clamps to the scrollable range, and the next frame's external-scroll
+      // check has to compare against what actually stuck.
+      this._scrollAnimLastWritten = scrollEl.scrollTop;
+      this._syncVirtualizerOffset(v, this._scrollAnimLastWritten);
+
+      if (progress < 1) {
+        this._scrollAnimRAF = requestAnimationFrame(step);
+        return;
+      }
+
+      // One last look: if everything that mounted along the way pushed the target
+      // further than a pixel, chase it with another (shorter, because closer) run.
+      const settled = this._measureTarget(index, align, padding);
+      if (
+        settled &&
+        settlePass < ANIM_MAX_SETTLE_PASSES &&
+        Math.abs(this._reachable(scrollEl, settled.top) - this._scrollAnimLastWritten) >
+          ANIM_SETTLE_EPSILON
+      ) {
+        this._animateScrollToIndex(index, align, padding, settlePass + 1);
+        return;
+      }
+      this._setConverging(false);
+    };
+
+    this._scrollAnimRAF = requestAnimationFrame(step);
+  }
+
+  /**
+   * `top` clamped to what the element can actually scroll to right now. An
+   * unreachable target would otherwise leave the animation a pixel or more short
+   * of it forever, and spend every settle pass re-discovering that.
+   */
+  private _reachable(scrollEl: HTMLElement, top: number): number {
+    const maxScroll = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
+    return Math.min(Math.max(top, 0), maxScroll);
+  }
+
+  /** Is the scroll sitting exactly where a clamp into the current range would put it? */
+  private _wasClampedIntoRange(scrollEl: HTMLElement): boolean {
+    const clamped = this._reachable(scrollEl, this._scrollAnimLastWritten);
+    return Math.abs(scrollEl.scrollTop - clamped) <= EXTERNAL_SCROLL_TOLERANCE;
+  }
+
+  private _scrollToIndexWithRetry(
+    index: number,
+    align: "start" | "center" | "end" | "auto",
+    instant: boolean,
+    padding: number,
+    retry: number,
+    expectedScrollTop: number | null
+  ): void {
+    const v = this._virtualizer;
+    if (!v || !this._virtualContainer) {
+      this._setConverging(false);
+      return;
+    }
+
+    const scrollEl = v.scrollElement;
+    if (!scrollEl) {
+      this._setConverging(false);
+      return;
+    }
+
+    if (!scrollEl.clientHeight) {
+      this._setConverging(false);
+      return;
+    }
+
+    // If something else moved the scroll between our last set and this retry
+    // (user scroll, another scrollTo call, etc), abandon the retry chain so we
+    // don't fight whoever took over.
+    if (
+      expectedScrollTop !== null &&
+      Math.abs(scrollEl.scrollTop - expectedScrollTop) > EXTERNAL_SCROLL_TOLERANCE
+    ) {
+      virtualizerLogger.debug("Aborting scrollToIndex retry: external scroll detected", {
+        expectedScrollTop,
+        actualScrollTop: scrollEl.scrollTop,
+        retry,
+      });
+      this._setConverging(false);
+      return;
+    }
+
+    const measured = this._measureTarget(index, align, padding);
+    if (!measured) {
+      this._setConverging(false);
+      return;
+    }
+    const { top: finalScrollTop, itemStart, itemSize } = measured;
 
     if (retry === 0) {
       virtualizerLogger.debug("scrollToIndex computed target", {
@@ -808,8 +1058,7 @@ class LyricsVirtualizer {
       virtualizerLogger.debug("scrollToIndex computed offsets", {
         itemStart,
         itemSize,
-        viewportHeight,
-        containerOffset,
+        viewportHeight: scrollEl.clientHeight,
         finalScrollTop,
       });
     } else {
@@ -829,10 +1078,15 @@ class LyricsVirtualizer {
     }
 
     // The scroll element has `scroll-behavior: smooth !important` (Simplebar.css),
-    // relaxed via `.InstantScroll` — but that class can race with style recalc. Under
-    // smooth behavior, re-issuing the scroll each retry restarts the eased animation so
-    // an in-range target crawls and never mounts. Passing explicit `behavior` to
-    // scrollTo() overrides the CSS outright, guaranteeing an instant jump.
+    // relaxed via `.InstantScroll` — but that class can race with style recalc, so
+    // `instant` is passed to scrollTo() as well, which does override the CSS.
+    //
+    // `"auto"` does NOT: per CSSOM-View it defers to the computed scroll-behavior,
+    // so a non-instant scroll from here is still the browser's smooth one, running
+    // on its own clock while the retries below try to converge on a target that is
+    // still moving. That is what the `jsLyricsScrolling` experiment replaces; this
+    // branch is what running with it disabled looks like, kept as the fallback.
+    // `instant` scrolls are unaffected and always take this path.
     scrollEl.scrollTo({
       top: finalScrollTop,
       behavior: instant ? "instant" : "auto",
@@ -871,15 +1125,7 @@ class LyricsVirtualizer {
       });
     }
 
-    // Wayland quirk: a programmatic scrollTop write may not dispatch a 'scroll' event,
-    // so observeElementOffset never updates scrollOffset and the virtual window stays
-    // pinned to the old position while the DOM scrolled (blank lyrics until a manual
-    // scroll). Push the observed offset into the virtualizer and re-render so the right
-    // window mounts regardless. No-op where the event fires (offsets already match).
-    if (v.scrollOffset == null || Math.abs(v.scrollOffset - observedScrollTop) >= 1) {
-      v.scrollOffset = observedScrollTop;
-      this._onVirtualizerChange(v);
-    }
+    this._syncVirtualizerOffset(v, observedScrollTop);
 
     if (retry < LyricsVirtualizer._MAX_SCROLL_RETRIES) {
       this._scrollVerifyRAF = requestAnimationFrame(() => {
@@ -929,13 +1175,15 @@ class LyricsVirtualizer {
       wrappers: this._wrappers.length,
       hasVirtualizer: Boolean(this._virtualizer),
     });
-    if (this._scrollVerifyRAF !== null) {
-      cancelAnimationFrame(this._scrollVerifyRAF);
-      this._scrollVerifyRAF = null;
-    }
+    this._cancelPendingScroll();
     // Reset convergence so the next virtualizer instance doesn't inherit a stale `true`
     // (which would make _setConverging(true) a no-op and never install the hook).
     this._converging = false;
+    // Hand `scroll-behavior` back to the stylesheet — the next instance re-declares it
+    // if it animates the scroll itself, and a torn-down page must not keep our override.
+    this._scrollEl?.style.removeProperty("scroll-behavior");
+    this._jsScrolling = false;
+    this._scrollAnimLastWritten = 0;
     this._maid?.Destroy();
     this._maid = null;
     this._scrollEl = null;
