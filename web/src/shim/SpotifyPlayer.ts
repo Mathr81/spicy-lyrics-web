@@ -5,6 +5,15 @@
 // pushes into, and expose the exact same `SpotifyPlayer` surface the rendering
 // engine consumes. The only thing the animator actually reads every frame is
 // `GetPosition()` (milliseconds).
+//
+// That one number is the lyric clock, and it is read ~60x a second from a source
+// that is sampled at best once a second, asynchronously, over the network. What
+// keeps it honest is in `GetProgress()` below and mirrors the extension's
+// `src/utils/Gets/GetProgress.ts`: extrapolate on the local monotonic clock,
+// anchor each sample at the moment it was actually true rather than the moment
+// it arrived, hold the anchor through a source that has stopped refreshing, and
+// low-pass the remaining jitter instead of snapping to it.
+import { $playbackOffset } from "@src/utils/stores.ts";
 
 export type CoverSizes = "standard" | "small" | "large" | "xlarge";
 export type Artist = { type: "artist"; name: string; uri: string };
@@ -30,14 +39,30 @@ const EMPTY_TRACK: TrackState = {
 const state = {
   track: { ...EMPTY_TRACK },
   isPlaying: false,
-  // Position clock anchor.
+  // Position clock anchor: the track was at `anchorMs` when the monotonic clock
+  // read `anchorAt`. Both live on `performance.now()`, which — unlike Date.now()
+  // — cannot be stepped by an NTP correction mid-song.
   anchorMs: 0,
   anchorAt: performance.now(),
+  // The last position the source reported, to recognise one that has stopped
+  // refreshing. See pushPlaybackState.
+  lastReportedMs: null as number | null,
 };
 
 // --- Position smoothing (a trimmed port of GetProgress.normalizeProgress) ---
+// Deltas within this window are treated as jitter and smoothed; anything larger
+// is a real seek or track change and snaps immediately.
 const JITTER_RESYNC_THRESHOLD = 500;
+// Low-pass time constant (ms), applied as alpha = 1 - exp(-elapsed / TAU) so the
+// smoothing is frame-rate independent. A proportional pull rather than a
+// deadband, so there is no steady-state offset: it cancels divergence without
+// ever adding lag, because the clock itself advances on real time.
 const JITTER_TIME_CONSTANT = 300;
+// Forward lead (ms) applied while playing, compensating for the audio output
+// latency between "the player is at position X" and the sound reaching the ear.
+// The extension's PROGRESS_POSITION_OFFSET, same value. A perceptual dial, not a
+// correctness value — $playbackOffset is the per-setup one on top of it.
+const POSITION_LEAD_MS = 100;
 let predicted: { id: string | null; pos: number; at: number } | null = null;
 
 function clampToTrack(pos: number): number {
@@ -52,15 +77,49 @@ export function pushPlaybackState(next: {
   positionMs: number;
   isPlaying: boolean;
   track?: Partial<TrackState>;
+  /**
+   * When this sample was actually true, on the `performance.now()` timeline.
+   *
+   * Reading playback state is asynchronous, and in Connect mirror mode it is a
+   * network round trip: `positionMs` describes a moment that has already passed
+   * by the time it gets here. Anchoring it at arrival would leave the clock late
+   * by the full round trip — a fixed, invisible lag of anywhere from 50ms on
+   * wifi to several hundred on cellular. Callers pass the request/response
+   * midpoint. Omitting it falls back to now, which is only correct for a source
+   * that answers synchronously.
+   */
+  sampledAt?: number;
 }): void {
+  const sampledAt = next.sampledAt ?? performance.now();
+  const wasPlaying = state.isPlaying;
+
+  let trackChanged = false;
   if (next.track) {
-    const changedTrack = next.track.uri && next.track.uri !== state.track.uri;
+    trackChanged = !!(next.track.uri && next.track.uri !== state.track.uri);
     state.track = { ...state.track, ...next.track };
-    if (changedTrack) predicted = null;
+    if (trackChanged) predicted = null;
   }
+
+  // A source handing back the position it gave last time has not refreshed:
+  // /me/player reports the remote device's last known state, which can easily
+  // repeat between two one-second polls. Re-anchoring on a repeat would rewind
+  // the clock by a whole poll interval, and the jitter filter — seeing a delta
+  // far past its threshold — would read that as a seek and snap backwards. Hold
+  // the anchor instead and keep extrapolating through the gap, the way
+  // GetProgress holds its anchor across a stalling getPositionState.
+  const sourceStalled =
+    !trackChanged &&
+    wasPlaying &&
+    next.isPlaying &&
+    state.lastReportedMs !== null &&
+    next.positionMs === state.lastReportedMs;
+
+  state.lastReportedMs = next.positionMs;
   state.isPlaying = next.isPlaying;
+  if (sourceStalled) return;
+
   state.anchorMs = next.positionMs;
-  state.anchorAt = performance.now();
+  state.anchorAt = sampledAt;
 }
 
 export function setPlaying(isPlaying: boolean): void {
@@ -68,6 +127,9 @@ export function setPlaying(isPlaying: boolean): void {
   state.anchorMs = rawPosition();
   state.anchorAt = performance.now();
   state.isPlaying = isPlaying;
+  // The next sample is authoritative whatever it says: a pause/resume is exactly
+  // when a repeated position is genuine rather than a stalled source.
+  state.lastReportedMs = null;
 }
 
 function rawPosition(): number {
@@ -78,7 +140,7 @@ function rawPosition(): number {
 function normalize(pos: number): number {
   const id = state.track.id;
   const measured = clampToTrack(pos);
-  const now = Date.now();
+  const now = performance.now();
   if (!predicted || predicted.id !== id || !state.isPlaying) {
     predicted = { id, pos: measured, at: now };
     return measured;
@@ -98,7 +160,14 @@ function normalize(pos: number): number {
 }
 
 function GetProgress(): number {
-  return normalize(rawPosition());
+  // Mirrors GetProgress.ts's final assembly. The user offset applies in both
+  // states so the active line doesn't jump when playback pauses; the audio
+  // latency lead only applies while sound is actually coming out. Its sign reads
+  // the way the setting is described: negative runs the lyrics early, positive
+  // holds them back.
+  const offset = $playbackOffset.get();
+  const raw = rawPosition();
+  return normalize(state.isPlaying ? raw + POSITION_LEAD_MS - offset : raw - offset);
 }
 
 export const SpotifyPlayer = {

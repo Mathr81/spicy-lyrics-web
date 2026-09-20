@@ -6,6 +6,7 @@ import {
   $simpleLyricsMode,
   $minimalLyricsMode,
   $skipSpicyFont,
+  $playbackOffset,
 } from "@src/utils/stores.ts";
 import {
   isWakeLockEnabled,
@@ -29,6 +30,12 @@ interface ToggleDef {
   get: () => boolean;
   set: (v: boolean) => void;
 }
+
+// The lyric clock corrects for network latency and for a typical audio output
+// delay, but it cannot know this listener's: Bluetooth headphones alone add
+// 150-300ms, and it varies per device. This is the dial for that last gap.
+const OFFSET_RANGE_MS = 1000;
+const OFFSET_STEP_MS = 25;
 
 export function setupSettings(cb: SettingsCallbacks): SettingsHandle {
   // The Spicy Lyrics font is on unless explicitly skipped; keep the page class in
@@ -111,6 +118,54 @@ export function setupSettings(cb: SettingsCallbacks): SettingsHandle {
     return row;
   }
 
+  /**
+   * The lyric sync offset, in milliseconds. Positive holds the lyrics back,
+   * negative runs them early — the same sign convention as the engine's
+   * $playbackOffset, which this writes straight into.
+   */
+  function buildOffsetRow(): HTMLElement {
+    const row = document.createElement("div");
+    row.className = "sl-settings-row sl-settings-row-stacked";
+    row.innerHTML = `
+      <span class="sl-settings-text">
+        <span class="sl-settings-label"></span>
+        <span class="sl-settings-desc"></span>
+      </span>
+      <span class="sl-settings-slider">
+        <input type="range" aria-label="Décalage des paroles">
+        <button class="sl-settings-reset" type="button">Réinitialiser</button>
+      </span>`;
+    row.querySelector<HTMLElement>(".sl-settings-label")!.textContent =
+      "Décalage des paroles";
+    const desc = row.querySelector<HTMLElement>(".sl-settings-desc")!;
+    const input = row.querySelector<HTMLInputElement>("input")!;
+    input.min = String(-OFFSET_RANGE_MS);
+    input.max = String(OFFSET_RANGE_MS);
+    input.step = String(OFFSET_STEP_MS);
+
+    const sync = () => {
+      const value = $playbackOffset.get();
+      input.value = String(value);
+      desc.textContent =
+        value === 0
+          ? "Aligné sur la lecture. Glissez vers la droite si les paroles passent trop tôt."
+          : value > 0
+            ? `Paroles retardées de ${value} ms.`
+            : `Paroles avancées de ${-value} ms.`;
+    };
+    sync();
+
+    input.addEventListener("input", () => {
+      $playbackOffset.set(Number(input.value));
+      sync();
+    });
+    row.querySelector<HTMLElement>(".sl-settings-reset")!.addEventListener("click", () => {
+      $playbackOffset.set(0);
+      sync();
+    });
+    return row;
+  }
+
   function open(): void {
     if (overlay) {
       overlay.hidden = false;
@@ -125,6 +180,7 @@ export function setupSettings(cb: SettingsCallbacks): SettingsHandle {
     title.textContent = "Réglages";
     card.appendChild(title);
     for (const def of toggles) card.appendChild(buildRow(def));
+    card.appendChild(buildOffsetRow());
     const close = document.createElement("button");
     close.className = "sl-settings-close";
     close.textContent = "Fermer";

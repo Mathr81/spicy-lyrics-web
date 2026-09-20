@@ -85,11 +85,17 @@ export function getSdkDeviceId(): string | null {
   return sdkDeviceId;
 }
 
-function emit(snap: AdapterSnapshot): void {
+/**
+ * `sampledAt` is when `snap.positionMs` was true, on the `performance.now()`
+ * timeline — see `sampleMidpoint`. It is deliberately not part of
+ * AdapterSnapshot: only the lyric clock cares, UI listeners don't.
+ */
+function emit(snap: AdapterSnapshot, sampledAt?: number): void {
   last = snap;
   pushPlaybackState({
     positionMs: snap.positionMs,
     isPlaying: snap.isPlaying,
+    sampledAt,
     track: snap.track
       ? {
           uri: snap.track.uri,
@@ -102,6 +108,18 @@ function emit(snap: AdapterSnapshot): void {
       : undefined,
   });
   for (const l of listeners) l(snap);
+}
+
+/**
+ * The NTP-style midpoint of a state read: the value came back describing some
+ * instant between the request leaving and the response arriving, and with no
+ * further information the midpoint is the least-biased estimate of which.
+ *
+ * Anchoring at arrival instead — which is what happens when this is omitted —
+ * makes the lyric clock late by the whole round trip, every single sample.
+ */
+function sampleMidpoint(startedAt: number): number {
+  return startedAt + (performance.now() - startedAt) / 2;
 }
 
 // ---------------------------------------------------------------------------
@@ -196,17 +214,21 @@ async function initSdk(): Promise<boolean> {
 
     // Re-anchor position periodically so the clock stays tight during long lines.
     sdkPollTimer = window.setInterval(async () => {
+      const startedAt = performance.now();
       const state = await sdkPlayer.getCurrentState();
       if (!state) return;
-      emit({
-        track: sdkTrackToSimple(state.track_window?.current_track),
-        isPlaying: !state.paused,
-        positionMs: state.position ?? 0,
-        deviceName: "This browser",
-        mode: "sdk",
-        shuffle: !!state.shuffle,
-        repeat: repeatFromMode(state.repeat_mode),
-      });
+      emit(
+        {
+          track: sdkTrackToSimple(state.track_window?.current_track),
+          isPlaying: !state.paused,
+          positionMs: state.position ?? 0,
+          deviceName: "This browser",
+          mode: "sdk",
+          shuffle: !!state.shuffle,
+          repeat: repeatFromMode(state.repeat_mode),
+        },
+        sampleMidpoint(startedAt)
+      );
     }, 1000);
   });
 }
@@ -217,17 +239,21 @@ async function initSdk(): Promise<boolean> {
 function startConnectPolling(): void {
   const poll = async () => {
     try {
+      const startedAt = performance.now();
       const snap = await getPlaybackState();
       if (snap) {
-        emit({
-          track: snap.track,
-          isPlaying: snap.isPlaying,
-          positionMs: snap.progressMs,
-          deviceName: snap.deviceName,
-          mode: "connect",
-          shuffle: snap.shuffle,
-          repeat: snap.repeat,
-        });
+        emit(
+          {
+            track: snap.track,
+            isPlaying: snap.isPlaying,
+            positionMs: snap.progressMs,
+            deviceName: snap.deviceName,
+            mode: "connect",
+            shuffle: snap.shuffle,
+            repeat: snap.repeat,
+          },
+          sampleMidpoint(startedAt)
+        );
       } else {
         emit({
           track: null,

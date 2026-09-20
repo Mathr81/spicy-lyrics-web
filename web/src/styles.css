@@ -375,6 +375,45 @@ html.sl-ios-standalone .sl-status {
   line-height: 1.4;
 }
 
+/* The offset row carries a full-width slider, so it stacks instead of putting
+   the control beside the label, and it isn't a click-anywhere-to-toggle row. */
+.sl-settings-row-stacked {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  cursor: default;
+}
+
+.sl-settings-slider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.sl-settings-slider input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  accent-color: rgba(255, 255, 255, 0.85);
+  /* Comfortable drag target on touch without enlarging the row. */
+  height: 24px;
+}
+
+.sl-settings-reset {
+  flex-shrink: 0;
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.75);
+  background: rgba(255, 255, 255, 0.08);
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.sl-settings-reset:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
 .sl-settings-switch {
   flex-shrink: 0;
   width: 46px;
