@@ -126,3 +126,36 @@ export async function setShuffle(state: boolean): Promise<void> {
 export async function setRepeat(state: "off" | "context" | "track"): Promise<void> {
   await req(`/me/player/repeat?state=${state}`, { method: "PUT" });
 }
+
+/**
+ * The three outcomes of asking for a track's audio analysis, kept apart because
+ * they call for different responses: `missing` concerns one track, `unavailable`
+ * means no track will ever work here.
+ */
+export type AudioAnalysisResult =
+  | { status: "ok"; data: unknown }
+  /** 403 — Spotify withdrew this endpoint for apps registered after 2024-11-27. */
+  | { status: "unavailable" }
+  /** 404, or a payload without the fields the animation controller reads. */
+  | { status: "missing" };
+
+/**
+ * GET /v1/audio-analysis/{id} — beats, sections and loudness, which the engine's
+ * BackgroundAnimationController turns into the dynamic background's speed.
+ *
+ * Throws on transient failures (network, 429, expired token) so the caller can
+ * tell them apart from a definitive answer.
+ */
+export async function getAudioAnalysis(trackId: string): Promise<AudioAnalysisResult> {
+  if (!trackId) return { status: "missing" };
+  const res = await req(`/audio-analysis/${trackId}`);
+  if (res.status === 403) return { status: "unavailable" };
+  if (res.status === 404) return { status: "missing" };
+  if (!res.ok) throw new Error(`Audio analysis failed: ${res.status}`);
+  const json = await res.json();
+  // The controller only reads these three; anything less is unusable.
+  if (!json?.track || !Array.isArray(json.sections) || !Array.isArray(json.beats)) {
+    return { status: "missing" };
+  }
+  return { status: "ok", data: json };
+}

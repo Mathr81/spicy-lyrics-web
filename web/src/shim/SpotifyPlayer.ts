@@ -155,3 +155,14 @@ export const SpotifyPlayer = {
 export function getTrackState(): TrackState {
   return state.track;
 }
+
+/**
+ * Whether playback is running right now.
+ *
+ * Reads the shim's own state rather than the playback adapter's, so it is also
+ * correct under `?demo`, which drives `pushPlaybackState` directly and never
+ * starts an adapter.
+ */
+export function isPlaying(): boolean {
+  return state.isPlaying;
+}
