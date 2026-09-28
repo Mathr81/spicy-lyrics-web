@@ -50,6 +50,7 @@ const PAGE_HTML = `
             <div class="SongName"><span></span></div>
             <div class="Artists"><span></span></div>
           </div>
+          <button class="sl-mini-play" type="button" aria-label="Lecture"></button>
         </div>
       </div>
     </div>

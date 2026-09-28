@@ -142,6 +142,10 @@ export function setupMediaBoxControls(
   loop.addEventListener("click", () => void cycleRepeat());
 
   // --- Seek ---
+  // A finger gets the whole timeline row, time labels included: the bar itself is
+  // a few pixels tall, which is fine for a cursor and a miss for a thumb. A mouse
+  // keeps to the bar, so clicking a time label does not jump to either end.
+  const timeline = mediaContent.querySelector<HTMLElement>(".Timeline")!;
   let seeking = false;
   const fractionFromEvent = (e: PointerEvent): number => {
     const rect = slider.getBoundingClientRect();
@@ -151,24 +155,26 @@ export function setupMediaBoxControls(
     slider.style.setProperty("--SliderProgress", `${f}`);
     posEl.textContent = fmt(f * SpotifyPlayer.GetDuration());
   };
-  slider.addEventListener("pointerdown", (e) => {
+  timeline.addEventListener("pointerdown", (e) => {
+    if (e.pointerType === "mouse" && !slider.contains(e.target as Node)) return;
     seeking = true;
-    slider.setPointerCapture(e.pointerId);
+    slider.classList.add("Dragging");
+    timeline.setPointerCapture(e.pointerId);
     previewSeek(fractionFromEvent(e));
   });
-  slider.addEventListener("pointermove", (e) => {
+  timeline.addEventListener("pointermove", (e) => {
     if (seeking) previewSeek(fractionFromEvent(e));
   });
-  const endSeek = (e: PointerEvent) => {
-    if (!seeking) return;
+  const stopSeeking = () => {
     seeking = false;
-    const f = fractionFromEvent(e);
-    void seekTo(f * SpotifyPlayer.GetDuration());
+    slider.classList.remove("Dragging");
   };
-  slider.addEventListener("pointerup", endSeek);
-  slider.addEventListener("pointercancel", () => {
-    seeking = false;
+  timeline.addEventListener("pointerup", (e) => {
+    if (!seeking) return;
+    stopSeeking();
+    void seekTo(fractionFromEvent(e) * SpotifyPlayer.GetDuration());
   });
+  timeline.addEventListener("pointercancel", stopSeeking);
 
   // --- Timeline tick ---
   setInterval(() => {
@@ -180,9 +186,17 @@ export function setupMediaBoxControls(
     slider.style.setProperty("--SliderProgress", `${dur > 0 ? pos / dur : 0}`);
   }, 250);
 
+  // Phone layout only (CSS shows it there): play/pause without opening the cover.
+  const miniPlay = page.querySelector<HTMLButtonElement>(".NowBar .Header .sl-mini-play");
+  miniPlay?.addEventListener("click", () => void togglePlay());
+
   // --- Playback state → icons ---
   const applyState = () => {
     const s = getSnapshot();
+    if (miniPlay) {
+      miniPlay.innerHTML = s.isPlaying ? Icons.Pause : Icons.Play;
+      miniPlay.setAttribute("aria-label", s.isPlaying ? "Pause" : "Lecture");
+    }
     playToggle.classList.toggle("Playing", s.isPlaying);
     playToggle.classList.toggle("Paused", !s.isPlaying);
     playToggle.innerHTML = s.isPlaying ? Icons.Pause : Icons.Play;
@@ -232,32 +246,112 @@ export function setupMediaBoxControls(
     }
   };
 
-  mediaBox.addEventListener("mouseenter", () => {
+  // Mouse only: a tap also fires compatibility mouse events, and on a touch screen
+  // a synthesized mouseenter never gets its mouseleave, which left the controls
+  // stuck on after the first tap.
+  mediaBox.addEventListener("pointerenter", (e) => {
+    if (e.pointerType !== "mouse") return;
     mediaHover = true;
     kick();
   });
-  mediaBox.addEventListener("mouseleave", () => {
+  mediaBox.addEventListener("pointerleave", (e) => {
+    if (e.pointerType !== "mouse") return;
     mediaHover = false;
     kick();
   });
-  page.addEventListener("mousemove", () => {
+  page.addEventListener("pointermove", (e) => {
+    if (e.pointerType !== "mouse") return;
     lastMove = performance.now();
     kick();
   });
 
-  // Touch devices (iPad/iOS) have no hover — tapping the cover reveals the
-  // controls for a few seconds.
-  let touchTimer: number | undefined;
-  mediaBox.addEventListener("pointerdown", (e) => {
-    if (e.pointerType !== "touch") return;
-    mediaHover = true;
+  // --- Touch: tap to reveal ---
+  // Touch screens have no hover, so a tap on the cover (or, on a phone, on the
+  // title beside it) reveals the controls for a few seconds. `sl-controls-live`
+  // on the page mirrors that state: the phone layout keys its expanded card
+  // off it.
+  //
+  // The controls are invisible but still laid out while hidden, so the tap that
+  // reveals them must not also press whichever one is under the finger: that
+  // tap is swallowed, pointerdown (the seek bar) and click (everything else)
+  // alike. Once revealed, taps go through and push the auto-hide back.
+  const header = page.querySelector<HTMLElement>(".NowBar .Header")!;
+  const REVEAL_MS = 5000;
+  let revealed = false;
+  let hideTimer: number | undefined;
+  let swallowClick = false;
+
+  const setRevealed = (v: boolean) => {
+    revealed = v;
+    mediaHover = v;
+    page.classList.toggle("sl-controls-live", v);
+    window.clearTimeout(hideTimer);
+    if (v) hideTimer = window.setTimeout(() => setRevealed(false), REVEAL_MS);
     kick();
-    window.clearTimeout(touchTimer);
-    touchTimer = window.setTimeout(() => {
-      mediaHover = false;
-      kick();
-    }, 4000);
-  });
+  };
+  const holdOpen = () => {
+    if (!revealed) return;
+    window.clearTimeout(hideTimer);
+    hideTimer = window.setTimeout(() => setRevealed(false), REVEAL_MS);
+  };
+
+  header.addEventListener(
+    "pointerdown",
+    (e) => {
+      swallowClick = false;
+      if (e.pointerType === "mouse") return;
+      const target = e.target as Element;
+      if (target.closest(".sl-mini-play")) return;
+      if (!revealed && (mediaBox.contains(target) || target.closest(".Metadata"))) {
+        e.stopPropagation();
+        swallowClick = true;
+        setRevealed(true);
+        return;
+      }
+      holdOpen();
+    },
+    true
+  );
+  // A seek drag can outlast the timer; count its release as activity too.
+  header.addEventListener("pointerup", holdOpen, true);
+  header.addEventListener(
+    "click",
+    (e) => {
+      if (!swallowClick) return;
+      swallowClick = false;
+      e.stopPropagation();
+      e.preventDefault();
+    },
+    true
+  );
+
+  // A tap anywhere else puts the controls away. In the phone layout the open
+  // card covers the lyrics, so that tap is only a dismissal and goes no further.
+  let swallowPageClick = false;
+  page.addEventListener(
+    "pointerdown",
+    (e) => {
+      swallowPageClick = false;
+      if (!revealed || e.pointerType === "mouse") return;
+      if (header.contains(e.target as Node)) return;
+      setRevealed(false);
+      if (page.classList.contains("CompactMode")) {
+        e.stopPropagation();
+        swallowPageClick = true;
+      }
+    },
+    true
+  );
+  page.addEventListener(
+    "click",
+    (e) => {
+      if (!swallowPageClick) return;
+      swallowPageClick = false;
+      e.stopPropagation();
+      e.preventDefault();
+    },
+    true
+  );
 
   return {
     setRomanizationAvailable(v) {
