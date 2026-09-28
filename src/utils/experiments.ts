@@ -57,12 +57,12 @@ export const EXPERIMENTS = [
     pageClass: "Exp_DuetLinePadding",
   },
   {
-    id: "jsLyricsScrolling",
-    label: "JS Lyrics Scrolling",
+    id: "lyricsSkeleton",
+    label: "Lyrics Loading Skeleton",
     description:
-      "Animates the auto-scroll to the active line in JavaScript, re-reading the target every frame so lines mounting underneath it can't pull the scroll off its mark. Disable to go back to the browser's native smooth scrolling, which cannot be steered mid-flight and is switched off entirely on iOS, where lyrics then jump line to line.",
+      "Shows placeholder lines and a small \"Loading Lyrics\" label while lyrics fetch and render, instead of the blurred spinner. Disable to bring the spinner back.",
     default: true,
-    rebuildsNowBar: true,
+    pageClass: "Exp_LyricsSkeleton",
   },
 ] as const satisfies readonly Experiment[];
 
@@ -95,9 +95,7 @@ export function setExperiment(id: ExperimentId, value: boolean): void {
 /** Sync every experiment's `pageClass` onto the page root. Safe to call anytime. */
 export function ApplyExperimentClasses(el: HTMLElement): void {
   for (const exp of EXPERIMENTS) {
-    // `in` rather than a plain property read: EXPERIMENTS is `as const`, so an
-    // entry that declares no pageClass has no such key at all to read.
-    if (!("pageClass" in exp) || !exp.pageClass) continue;
+    if (!exp.pageClass) continue;
     el.classList.toggle(exp.pageClass, isExperimentEnabled(exp.id));
   }
 }

@@ -139,7 +139,7 @@ requests through the proxy, which forwards them to `api.spicylyrics.org` with:
 - `Origin: https://xpui.app.spotify.com`
 - `Referer: https://xpui.app.spotify.com/`
 - a Spotify-client `User-Agent`
-- `SpicyLyrics-Version` (the `CLIENT_VERSION` var, `6.3.20` by default)
+- `SpicyLyrics-Version` (the `CLIENT_VERSION` var, `6.3.98` by default)
 
 and passes your `SpicyLyrics-WebAuth` Bearer token straight through (never logged
 or stored).
@@ -240,7 +240,7 @@ curl -s -X POST https://api.spicylyrics.org/query \
   -H 'Content-Type: application/json' \
   -H 'Origin: https://xpui.app.spotify.com' \
   -H 'Referer: https://xpui.app.spotify.com/' \
-  -H 'SpicyLyrics-Version: 6.3.20' -H 'X-mode: 2' \
+  -H 'SpicyLyrics-Version: 6.3.98' -H 'X-mode: 2' \
   -d '{"queries":[{"operationId":"0","operation":"pingConfig","variables":{}}]}'
 ```
 

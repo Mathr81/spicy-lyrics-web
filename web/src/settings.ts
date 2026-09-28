@@ -7,6 +7,8 @@ import {
   $minimalLyricsMode,
   $skipSpicyFont,
   $playbackOffset,
+  $smoothScrolling,
+  SETTINGS_KEY,
 } from "@src/utils/stores.ts";
 import {
   isWakeLockEnabled,
@@ -37,7 +39,24 @@ interface ToggleDef {
 const OFFSET_RANGE_MS = 1000;
 const OFFSET_STEP_MS = 25;
 
+/**
+ * The extension ships Smooth Scrolling off; here it is the whole point of a
+ * lyrics screen on an iPad or a phone, and without it iOS jumps line to line.
+ * Turn it on for anyone who has never chosen, leaving an explicit "off" alone.
+ */
+function defaultSmoothScrollingOn(): void {
+  try {
+    const blob = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}");
+    if (blob && typeof blob === "object" && "smoothScrolling" in blob) return;
+  } catch {
+    // Unreadable blob: the store fell back to its defaults too.
+  }
+  $smoothScrolling.set(true);
+}
+
 export function setupSettings(cb: SettingsCallbacks): SettingsHandle {
+  defaultSmoothScrollingOn();
+
   // The Spicy Lyrics font is on unless explicitly skipped; keep the page class in
   // sync now and whenever the store changes.
   const applyFont = () =>
@@ -53,6 +72,12 @@ export function setupSettings(cb: SettingsCallbacks): SettingsHandle {
         $skipSpicyFont.set(!v);
         applyFont();
       },
+    },
+    {
+      label: "Défilement fluide",
+      desc: "Les paroles glissent d'une ligne à l'autre au lieu de sauter.",
+      get: () => $smoothScrolling.get(),
+      set: (v) => $smoothScrolling.set(v),
     },
     {
       label: "Mode paroles simples",

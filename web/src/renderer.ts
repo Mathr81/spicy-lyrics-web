@@ -18,6 +18,13 @@ import { ScrollSimplebar } from "@src/utils/Scrolling/Simplebar/ScrollSimplebar.
 import { triggerRemeasureLV } from "@src/utils/Lyrics/LyricsVirtualizer.ts";
 import ApplyDynamicBackground from "./shim/dynamicBackground.ts";
 import { EnableCompactMode, DisableCompactMode } from "./shim/CompactMode.ts";
+import {
+  SkeletonMarkup,
+  IsLyricsSkeletonEnabled,
+  ShowLyricsSkeleton,
+  HideLyricsSkeleton,
+} from "@src/utils/Lyrics/LyricsSkeleton.ts";
+import { ApplyExperimentClasses, onExperimentChange } from "@src/utils/experiments.ts";
 import type { SimpleTrack } from "./spotify/api.ts";
 
 // iOS/iPadOS Safari throttles `scroll-behavior: smooth`, which makes the
@@ -50,6 +57,7 @@ const PAGE_HTML = `
       <div class="loaderContainer">
         <div id="DotLoader"></div>
       </div>
+      ${SkeletonMarkup}
       <div class="LyricsContent ScrollbarScrollable"></div>
     </div>
     <div class="ViewControls"></div>
@@ -71,6 +79,10 @@ export function buildPage(root: HTMLElement): HTMLElement {
   if (IS_IOS) el.classList.add("iOS");
   el.innerHTML = PAGE_HTML;
   root.appendChild(el);
+  // Experiments implemented as a page class (the loading skeleton, the glass
+  // progress bar…) are kept in sync here, as the extension's PageView does.
+  ApplyExperimentClasses(el);
+  onExperimentChange(() => ApplyExperimentClasses(el));
 
   page = el;
   setPageContainer(el);
@@ -173,6 +185,13 @@ export function updateNowBar(track: SimpleTrack | null): void {
 }
 
 export function showLoader(show: boolean): void {
+  // The skeleton replaces the spinner when its experiment is on (the CSS hides
+  // whichever one is not in use).
+  if (IsLyricsSkeletonEnabled()) {
+    if (show) ShowLyricsSkeleton();
+    else HideLyricsSkeleton();
+    return;
+  }
   const loader = page?.querySelector<HTMLElement>(".LyricsContainer .loaderContainer");
   loader?.classList.toggle("active", show);
 }

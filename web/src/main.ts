@@ -13,6 +13,7 @@ import "@src/css/Lyrics/main.css";
 import "@src/css/Lyrics/Mixed.css";
 import "@src/css/Loaders/LoaderContainer.css";
 import "@src/css/Loaders/DotLoader.css";
+import "@src/css/Loaders/LyricsSkeleton.css";
 import "@src/css/font-pack/font-pack.css";
 import "./styles.css";
 

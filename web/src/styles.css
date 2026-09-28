@@ -106,12 +106,12 @@ html.sl-ios-standalone .sl-status {
    override loses the specificity battle, so we mirror that selector shape (plus
    `.iOS`) to actually win.
 
-   With the `jsLyricsScrolling` experiment on — its default — the virtualizer
-   animates scrollTop itself and declares `scroll-behavior: auto` inline on the
-   very same element, so lyrics scroll smoothly here again and these rules are
-   redundant. They remain as the iOS half of the fallback for when that experiment
-   is turned off; without them, iOS would get the deferred native smooth scroll
-   rather than a usable jump.
+   With the engine's Smooth Scrolling setting on (the web build turns it on by
+   default, see settings.ts) the virtualizer glides scrollTop itself on a
+   spring, writing whole pixels with `behavior: "instant"`, so no native smooth
+   scroll is involved and lyrics glide on iOS too. These rules remain the iOS
+   half of the fallback for when that setting is off; without them, iOS would
+   get the deferred native smooth scroll rather than a usable jump.
 
    What is NOT restated here is `-webkit-overflow-scrolling: auto`, which this
    block used to set: it applies to the reader's own finger, not to programmatic
@@ -459,4 +459,27 @@ html.sl-ios-standalone .sl-status {
 
 .sl-settings-close:hover {
   background: rgba(255, 255, 255, 0.18);
+}
+
+/* Keyframes for the lyrics loading skeleton (LyricsSkeleton.css). The extension
+   injects these from app.tsx, which the web build does not run. */
+@keyframes SL_SkeletonSweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes SL_SkeletonDot {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-0.18em);
+  }
 }

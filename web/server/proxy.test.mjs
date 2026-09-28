@@ -90,8 +90,8 @@ const post = (body) =>
     body: JSON.stringify(body),
   }));
 
-const sessionOp = (operation, variables = {}) => ({ queries: [{ operationId: "0", operation, variables }], client: { version: "6.3.20" } });
-const lyricsOp = (id) => ({ queries: [{ operationId: "0", operation: "lyrics", variables: { id, auth: "SpicyLyrics-WebAuth" } }], client: { version: "6.3.20" } });
+const sessionOp = (operation, variables = {}) => ({ queries: [{ operationId: "0", operation, variables }], client: { version: "6.3.98" } });
+const lyricsOp = (id) => ({ queries: [{ operationId: "0", operation: "lyrics", variables: { id, auth: "SpicyLyrics-WebAuth" } }], client: { version: "6.3.98" } });
 
 let failed = 0;
 const check = (name, cond, extra = "") => { console.log(`${cond ? "PASS" : "FAIL"}  ${name}${extra ? "  " + extra : ""}`); if (!cond) failed++; };

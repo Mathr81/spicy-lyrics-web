@@ -109,7 +109,7 @@ function cfg(env) {
     // end-to-end tests can run against a stub instead of the real API.
     apiOrigin: (e.API_ORIGIN || API_ORIGIN).replace(/\/$/, ""),
     logLevel: LEVELS[String(e.LOG_LEVEL || "info").toLowerCase()] ?? LEVELS.info,
-    clientVersion: e.CLIENT_VERSION || "6.3.20",
+    clientVersion: e.CLIENT_VERSION || "6.3.98",
     lyricsCacheTtl: num(e.LYRICS_CACHE_TTL, 604800),
     lyricsMissCacheTtl: num(e.LYRICS_MISS_CACHE_TTL, 3600),
     clientPingIntervalMs: num(e.CLIENT_PING_INTERVAL_MS, 900000),
