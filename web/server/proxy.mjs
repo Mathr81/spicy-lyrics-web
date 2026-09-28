@@ -109,7 +109,7 @@ function cfg(env) {
     // end-to-end tests can run against a stub instead of the real API.
     apiOrigin: (e.API_ORIGIN || API_ORIGIN).replace(/\/$/, ""),
     logLevel: LEVELS[String(e.LOG_LEVEL || "info").toLowerCase()] ?? LEVELS.info,
-    clientVersion: e.CLIENT_VERSION || "6.3.98",
+    clientVersion: e.CLIENT_VERSION || "6.3.20",
     lyricsCacheTtl: num(e.LYRICS_CACHE_TTL, 604800),
     lyricsMissCacheTtl: num(e.LYRICS_MISS_CACHE_TTL, 3600),
     clientPingIntervalMs: num(e.CLIENT_PING_INTERVAL_MS, 900000),
@@ -319,6 +319,23 @@ function upstreamHeaders(env, auth, withAuthorization) {
     if (withAuthorization) h.set("Authorization", `Bearer ${auth}`);
   }
   return h;
+}
+
+// The page's lyrics query goes upstream as the page wrote it, but under our
+// headers, and the API answers `400 Invalid Request` when the body's
+// `client.version` disagrees with the `SpicyLyrics-Version` header. A page built
+// for a newer (or older) release than this proxy's CLIENT_VERSION would then get
+// nothing for every track not already cached. Stamp our own version on the body
+// so the two always match, whatever the page was built with.
+function withOwnVersion(bodyText, version) {
+  try {
+    const body = JSON.parse(bodyText);
+    if (!body || typeof body !== "object") return bodyText;
+    body.client = { ...(body.client ?? {}), version };
+    return JSON.stringify(body);
+  } catch {
+    return bodyText;
+  }
 }
 
 // --- TOTP (RFC 6238) via Web Crypto -----------------------------------------
@@ -768,7 +785,7 @@ export class SessionHub {
       const res = await fetch(`${cfg(this.env).apiOrigin}/query`, {
         method: "POST",
         headers: upstreamHeaders(this.env, token, false),
-        body: bodyText,
+        body: withOwnVersion(bodyText, cfg(this.env).clientVersion),
       });
       const buf = await res.arrayBuffer();
       const contentType = res.headers.get("Content-Type") || "application/json";

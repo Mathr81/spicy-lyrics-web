@@ -16,6 +16,11 @@ globalThis.fetch = async (url, init) => {
     const body = JSON.parse(init.body);
     const op = body.queries[0].operation;
     upstream.calls.push(op);
+    // The real API rejects a body whose version disagrees with the header.
+    const headerVersion = new Headers(init.headers).get("SpicyLyrics-Version");
+    if (body.client?.version !== headerVersion) {
+      return new Response(JSON.stringify({ error: "Invalid Request" }), { status: 400 });
+    }
     if (upstream.blockNext) {
       const pages = {
         // The classic "you have been blocked" interstitial...
@@ -90,8 +95,8 @@ const post = (body) =>
     body: JSON.stringify(body),
   }));
 
-const sessionOp = (operation, variables = {}) => ({ queries: [{ operationId: "0", operation, variables }], client: { version: "6.3.98" } });
-const lyricsOp = (id) => ({ queries: [{ operationId: "0", operation: "lyrics", variables: { id, auth: "SpicyLyrics-WebAuth" } }], client: { version: "6.3.98" } });
+const sessionOp = (operation, variables = {}) => ({ queries: [{ operationId: "0", operation, variables }], client: { version: "6.3.20" } });
+const lyricsOp = (id) => ({ queries: [{ operationId: "0", operation: "lyrics", variables: { id, auth: "SpicyLyrics-WebAuth" } }], client: { version: "6.3.20" } });
 
 let failed = 0;
 const check = (name, cond, extra = "") => { console.log(`${cond ? "PASS" : "FAIL"}  ${name}${extra ? "  " + extra : ""}`); if (!cond) failed++; };
@@ -205,6 +210,17 @@ check("stats show client ops >> upstream traffic",
   check("a challenge is never cached either",
     upstream.calls.filter((c) => c === "lyrics").length === 1);
   check("and then succeeds", (await retry.json()).queries[0].result.data.Type === "Syllable");
+}
+
+// 5. A page built for another release than the proxy's CLIENT_VERSION: its
+//    body version must not reach upstream against our header.
+{
+  upstream.calls.length = 0;
+  const skewed = lyricsOp("7VersionSkewTrack");
+  skewed.client.version = "9.9.9";
+  const r = await post(skewed);
+  check("page on another version still gets its lyrics", r.status === 200, `status ${r.status}`);
+  check("…with the lyrics body", r.status === 200 && (await r.json()).queries[0].result.data.Type === "Syllable");
 }
 
 hub.stop();

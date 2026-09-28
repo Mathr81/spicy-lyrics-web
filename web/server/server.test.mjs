@@ -109,7 +109,7 @@ const q = (body) =>
 const sessionOp = (operation) => ({ queries: [{ operationId: "0", operation, variables: {} }] });
 const lyricsOp = (id) => ({
   queries: [{ operationId: "0", operation: "lyrics", variables: { id, auth: "SpicyLyrics-WebAuth" } }],
-  client: { version: "6.3.98" },
+  client: { version: "6.3.20" },
 });
 
 let host = startHost();

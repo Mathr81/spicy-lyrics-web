@@ -35,10 +35,13 @@ export const SCOPES: string[] = [
 export const LYRICS_API: string =
   (import.meta as any).env?.VITE_LYRICS_API ?? "https://api.spicylyrics.org";
 
-// Sent as the `SpicyLyrics-Version` header. Match the extension's version so the
-// API treats us as a known client. Keep in sync with project/config.ts.
+// Sent as the `SpicyLyrics-Version` header and the body's `client.version`.
+// Deliberately NOT the extension's ProjectVersion: it must match the proxy's
+// CLIENT_VERSION (web/server), because a proxy without the version-stamping fix
+// forwards this body under its own header, and the API answers a mismatch with
+// `400 Invalid Request`. Bump the proxy first. See UPDATING.md.
 export const CLIENT_VERSION: string =
-  (import.meta as any).env?.VITE_SPICY_VERSION ?? "6.3.98";
+  (import.meta as any).env?.VITE_SPICY_VERSION ?? "6.3.20";
 
 // The Web Playback SDK is unsupported in mobile browsers (iOS/iPadOS Safari,
 // most mobile Chrome). We detect that to fall back to Spotify Connect mirror.

@@ -78,10 +78,16 @@ bun run web:preview  # smoke-test the lyrics render, sync, controls
 - **Build OK but something's broken at runtime** (e.g. lyrics don't sync, cover
   controls misbehave)? An interface a shim implements probably changed — open the
   matching file in `web/src/shim/` and realign it with the new upstream module.
-- **New API version?** If upstream bumps the API/client version (see
-  `project/config.ts` → `ProjectVersion`, currently `6.3.98`), match it in
-  `web/src/config.ts` (`CLIENT_VERSION`) and, if the lyrics API changed its
-  session/query protocol, in `web/src/lyrics/` and `web/server/proxy.mjs`.
+- **New API version?** Do **not** bump `CLIENT_VERSION` in
+  `web/src/config.ts` just because `project/config.ts` → `ProjectVersion` moved
+  (it is `6.3.98` while the web build and the proxy stay on `6.3.20`). Behind
+  the proxy it is the proxy's `CLIENT_VERSION` that reaches the API, and a
+  proxy older than its version-stamping fix forwards the page's body version
+  under its own header: the API rejects that mismatch with `400 Invalid
+  Request`, for every track not already cached. Bump the proxy first
+  (`CLIENT_VERSION` in its `.env`, then redeploy), check a fresh track through
+  it, and only then the page. If the lyrics API changed its session/query
+  protocol, update `web/src/lyrics/` and `web/server/proxy.mjs` too.
 
 ## Finish
 
