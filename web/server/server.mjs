@@ -1,26 +1,23 @@
 #!/usr/bin/env node
 // HTTP host for the Spicy Lyrics proxy — a VPS, a home server, a container.
 //
-// `proxy.mjs` holds the logic (CORS, the minted web-player token, the single
-// shared API session, coalescing). This file is the parts that touch the
-// machine: an HTTP server, a lyric cache on disk, and the hub's state in a JSON
-// file. One process is one hub, so "every device is one client to the API" is a
-// property of running it, not something to configure.
+// `proxy.mjs` holds the logic (CORS, the API key, coalescing, the rate-limit
+// cooldown). This file is the parts that touch the machine: an HTTP server and
+// a lyric cache on disk.
 //
 //   node server.mjs                 # listens on $PORT (default 8787)
 //
 // Configuration, all from the environment:
 //
-//   SP_DC                    required for synced lyrics (your Spotify cookie)
+//   SPICY_API_KEY            required: your Spicy Lyrics API key (sl_sk_…)
 //   PORT                     default 8787
-//   STATE_DIR                default ./.state — session + lyric cache on disk
+//   STATE_DIR                default ./.state — lyric cache on disk
 //   PROXY_URL                send the proxy's OWN outbound requests through
 //                            another proxy, e.g. socks5://127.0.0.1:1080
 //                            (also read from ALL_PROXY)
 //   LOG_LEVEL                debug | info | warn | error | silent
 //   API_ORIGIN               upstream base URL (default https://api.spicylyrics.org)
-//   CLIENT_VERSION, LYRICS_CACHE_TTL, LYRICS_MISS_CACHE_TTL,
-//   CLIENT_PING_INTERVAL_MS, CLIENT_SESSION_TTL_S, SESSION_IDLE_MS
+//   LYRICS_CACHE_TTL, LYRICS_MISS_CACHE_TTL
 //
 // Serve it over HTTPS (a reverse proxy such as Caddy in front) if the page
 // itself is on HTTPS — browsers block mixed content, and the Screen Wake Lock
@@ -41,19 +38,17 @@ function log(...args) {
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const STATE_DIR = path.resolve(process.env.STATE_DIR || path.join(HERE, ".state"));
 const CACHE_DIR = path.join(STATE_DIR, "lyrics-cache");
-const STATE_FILE = path.join(STATE_DIR, "session.json");
 const PORT = Number(process.env.PORT || 8787);
 
 fs.mkdirSync(CACHE_DIR, { recursive: true });
 
 // --- outbound proxy --------------------------------------------------------
-// Optional: route everything this process sends (the lyrics API and Spotify's
-// token endpoints alike) through a SOCKS5 or HTTP CONNECT proxy. Installed
+// Optional: route everything this process sends to the lyrics API through a SOCKS5 or HTTP CONNECT proxy. Installed
 // before proxy.mjs is imported so no outbound call can take the direct path.
 // Deliberately NOT read from HTTPS_PROXY / HTTP_PROXY. Those are commonly set
 // on a machine for unrelated reasons (apt, curl, a corporate setup), and picking
-// them up silently would reroute this process's traffic — Spotify tokens
-// included — somewhere the operator never chose. Proxying here is opt-in:
+// them up silently would reroute this process's traffic — API key included —
+// somewhere the operator never chose. Proxying here is opt-in:
 // `PROXY_URL`, or `ALL_PROXY`, whose whole meaning is "proxy everything".
 // If HTTPS_PROXY is what you want, say so: PROXY_URL="$HTTPS_PROXY".
 const PROXY_VARS = ["PROXY_URL", "ALL_PROXY", "all_proxy"];
@@ -65,15 +60,15 @@ if (proxyVar) {
   installProxyFetch(outboundProxy, () => {});
 }
 
-const { createProxy } = await import("./proxy.mjs");
+const { createProxy, keyKind } = await import("./proxy.mjs");
 
 // --- lyric cache -----------------------------------------------------------
 // Memory in front of disk, so a restart doesn't re-query the API for every song
-// you have already played. Lyrics don't change, so the only expiry is the TTL
-// the proxy asks for.
+// you have already played. An entry is the API's answer (a 200, or a 404 for a
+// song without lyrics) and expires after the TTL the proxy asks for.
 
 const MEM_CACHE_MAX = 500;
-const mem = new Map(); // id -> { expires, contentType, body: Buffer }
+const mem = new Map(); // id -> { expires, contentType, status, body: Buffer }
 
 const cacheFile = (id) =>
   path.join(CACHE_DIR, crypto.createHash("sha256").update(id).digest("hex") + ".json");
@@ -92,6 +87,7 @@ const cache = {
         entry = {
           expires: raw.expires,
           contentType: raw.contentType,
+          status: raw.status || 200,
           body: Buffer.from(raw.body, "base64"),
         };
         memSet(id, entry);
@@ -104,15 +100,16 @@ const cache = {
       fsp.rm(cacheFile(id), { force: true }).catch(() => {});
       return undefined;
     }
-    return { buf: entry.body, contentType: entry.contentType };
+    return { buf: entry.body, contentType: entry.contentType, status: entry.status };
   },
 
-  async put(id, { buf, contentType, ttl }) {
+  async put(id, { buf, contentType, status, ttl }) {
     if (!ttl) return;
     const body = Buffer.from(buf);
     const entry = {
       expires: Date.now() + ttl * 1000,
       contentType: contentType || "application/json",
+      status: status || 200,
       body,
     };
     memSet(id, entry);
@@ -122,6 +119,7 @@ const cache = {
         JSON.stringify({
           expires: entry.expires,
           contentType: entry.contentType,
+          status: entry.status,
           body: body.toString("base64"),
         })
       )
@@ -129,34 +127,7 @@ const cache = {
   },
 };
 
-// --- hub state -------------------------------------------------------------
-// A JSON file, written at most every 200ms: the hub saves on every counter
-// bump, and none of it is worth an fsync per lyric lookup.
-
-let writeTimer = null;
-let pendingState = null;
-
-const store = {
-  async load() {
-    try {
-      return JSON.parse(await fsp.readFile(STATE_FILE, "utf8"));
-    } catch {
-      return undefined;
-    }
-  },
-  async save(state) {
-    pendingState = state;
-    if (writeTimer) return;
-    writeTimer = setTimeout(() => {
-      writeTimer = null;
-      const out = JSON.stringify(pendingState);
-      fsp.writeFile(STATE_FILE, out).catch((err) => log("state write failed", err));
-    }, 200);
-    writeTimer.unref?.();
-  },
-};
-
-const proxy = createProxy({ env: process.env, cache, store });
+const proxy = createProxy({ env: process.env, cache });
 
 // --- HTTP server -----------------------------------------------------------
 
@@ -220,15 +191,17 @@ server.listen(PORT, () => {
       ? `outbound proxy: ${outboundProxy.label} (from ${proxyVar})`
       : "outbound proxy: none (direct) — set PROXY_URL to route through one"
   );
-  if (!process.env.SP_DC) {
-    log("WARNING: SP_DC is not set — synced lyrics will be unavailable (text only).");
+  const key = String(process.env.SPICY_API_KEY || "").trim();
+  if (!key) {
+    log("WARNING: SPICY_API_KEY is not set — every lyrics request will fail.");
+  } else {
+    log(`api key: ${keyKind(key)} (${key.slice(0, 6)}…)`);
   }
 });
 
 for (const sig of ["SIGINT", "SIGTERM"]) {
   process.on(sig, () => {
     log(`${sig} — shutting down`);
-    proxy.hub.stop();
     server.close(() => process.exit(0));
   });
 }

@@ -71,8 +71,8 @@ web wrapper that reuses it:
 | `web/` | The **web app** — everything specific to this project lives here. |
 | `web/src/shim/` | Browser stand-ins for the Spicetify-coupled modules (`SpotifyPlayer`, `Platform`, `PageView`, `Fullscreen`, …). |
 | `web/src/spotify/` | The Spotify adapter — OAuth PKCE, Web Playback SDK, Connect mirror. |
-| `web/src/lyrics/` | Lyrics fetch, API session keep-alive, caching. |
-| `web/server/` | The proxy that unlocks synced lyrics, caches them, and makes every device one client to the API. Plain Node; ships with a Docker Compose file. |
+| `web/src/lyrics/` | Lyrics fetch (official Spicy Lyrics API) and caching. |
+| `web/server/` | The proxy that holds the Spicy Lyrics API key, caches lyrics, and makes every device one client to the API. Plain Node; ships with a Docker Compose file. |
 | `vite.config.ts` | Wires it together — aliases + a plugin that swaps the shimmed modules at build time. |
 
 ## Keeping up with upstream Spicy Lyrics

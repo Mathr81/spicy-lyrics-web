@@ -9,7 +9,7 @@
 # Or without compose:
 #   docker build -t spicy-lyrics-proxy web/server
 #   docker run -d --name spicy-lyrics-proxy -p 127.0.0.1:8787:8787 \
-#     -e SP_DC=<your sp_dc cookie> -v spicy-proxy-state:/state \
+#     -e SPICY_API_KEY=sl_sk_... -v spicy-proxy-state:/state \
 #     --restart unless-stopped spicy-lyrics-proxy
 FROM node:22-alpine
 

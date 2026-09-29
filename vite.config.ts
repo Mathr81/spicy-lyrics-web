@@ -64,6 +64,28 @@ function caseInsensitiveResolve(): Plugin {
   };
 }
 
+/**
+ * Everything `VITE_*` is inlined into the public bundle. A Spicy Lyrics
+ * *secret* key (`sl_sk_…`) there would be published with the site, so refuse
+ * to build rather than ship it: it belongs in the proxy's SPICY_API_KEY.
+ */
+function refuseSecretKey(): Plugin {
+  return {
+    name: "spicy-refuse-secret-key",
+    configResolved(config) {
+      for (const [name, value] of Object.entries(config.env)) {
+        if (typeof value === "string" && value.trim().startsWith("sl_sk_")) {
+          throw new Error(
+            `${name} holds a Spicy Lyrics secret key (sl_sk_…), which would be ` +
+              "published in the bundle. Put it in the proxy's SPICY_API_KEY " +
+              "(web/server/.env) instead."
+          );
+        }
+      }
+    },
+  };
+}
+
 export default defineConfig({
   root: R("web"),
   base: "./",
@@ -82,6 +104,7 @@ export default defineConfig({
       "src/utils/Lyrics/ProcessLyrics.ts": "web/src/shim/ProcessLyrics.ts",
     }),
     caseInsensitiveResolve(),
+    refuseSecretKey(),
   ],
   resolve: {
     alias: {

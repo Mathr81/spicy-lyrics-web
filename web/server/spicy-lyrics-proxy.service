@@ -1,10 +1,10 @@
 # systemd unit for a VPS or home server.
 #
 #   sudo cp spicy-lyrics-proxy.service /etc/systemd/system/
-#   sudo systemctl edit spicy-lyrics-proxy    # add: [Service] \n Environment=SP_DC=...
+#   sudo systemctl edit spicy-lyrics-proxy    # add: [Service] \n Environment=SPICY_API_KEY=sl_sk_...
 #   sudo systemctl enable --now spicy-lyrics-proxy
 #
-# Put the cookie in the drop-in (or an EnvironmentFile with mode 600), never in
+# Put the key in the drop-in (or an EnvironmentFile with mode 600), never in
 # this file — it is world-readable in /etc/systemd/system.
 
 [Unit]
@@ -20,7 +20,7 @@ Environment=STATE_DIR=%S/spicy-lyrics-proxy
 # Route this service's own outbound requests through a proxy, e.g. a local
 # SOCKS5 tunnel. Omit for a direct connection.
 # Environment=PROXY_URL=socks5://127.0.0.1:1080
-# Environment=SP_DC=...        <- put this in a drop-in, not here
+# Environment=SPICY_API_KEY=... <- put this in a drop-in, not here
 StateDirectory=spicy-lyrics-proxy
 Restart=always
 RestartSec=5

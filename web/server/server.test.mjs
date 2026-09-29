@@ -1,9 +1,9 @@
 // End-to-end test for the Node host — run with `npm test`.
 //
 // proxy.test.mjs proves the proxy's logic against in-memory stubs. This proves
-// the *host*: that the real lyric cache (memory in front of disk) and the real
-// state file satisfy what proxy.mjs asks of them, over real HTTP, across a
-// restart, and through an outbound SOCKS5 proxy.
+// the *host*: that the real lyric cache (memory in front of disk) satisfies what
+// proxy.mjs asks of it, over real HTTP, across a restart, and through an
+// outbound SOCKS5 proxy.
 //
 //   node server.test.mjs
 
@@ -25,27 +25,15 @@ const check = (name, cond, extra = "") => {
 };
 
 // --- stub API --------------------------------------------------------------
-const upstream = { calls: [] };
-const api = http.createServer((req, res) => {
-  let raw = "";
-  req.on("data", (c) => (raw += c));
-  req.on("end", async () => {
-    const op = JSON.parse(raw).queries[0].operation;
-    upstream.calls.push(op);
-    await new Promise((r) => setTimeout(r, 40)); // make coalescing observable
-    const data =
-      op === "createSession" || op === "refreshSession"
-        ? { tk: "UPSTREAM-TOKEN" }
-        : op === "lyrics"
-          ? { Type: "Syllable", Content: [1, 2, 3] }
-          : { ok: true };
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(
-      JSON.stringify({
-        queries: [{ operationId: "0", operation: op, result: { httpStatus: 200, data } }],
-      })
-    );
-  });
+const KEY = "sl_sk_server_test";
+const upstream = { calls: [], auth: [] };
+const api = http.createServer(async (req, res) => {
+  const id = req.url.split("/").pop();
+  upstream.calls.push(id);
+  upstream.auth.push(req.headers.authorization);
+  await new Promise((r) => setTimeout(r, 40)); // make coalescing observable
+  res.writeHead(200, { "Content-Type": "application/json", "RateLimit-Remaining": "59" });
+  res.end(JSON.stringify({ Body: { id, source: "spicy_lyrics", Type: "Syllable", Content: [1, 2, 3] }, Status: 200, Type: "object" }));
 });
 await new Promise((r) => api.listen(0, "127.0.0.1", r));
 const API_ORIGIN = `http://127.0.0.1:${api.address().port}`;
@@ -76,10 +64,7 @@ function startHost(extraEnv = {}) {
       STATE_DIR: STATE,
       API_ORIGIN,
       LOG_LEVEL: "silent",
-      // No SP_DC on purpose: the stub API authorises nothing, and minting a real
-      // web-player token would mean reaching out to open.spotify.com from a test.
-      SP_DC: "",
-      DISABLE_SECRET_FETCH: "1",
+      SPICY_API_KEY: KEY,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -100,71 +85,40 @@ async function waitReady() {
   throw new Error("host did not start");
 }
 
-const q = (body) =>
-  fetch(`${BASE}/query`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Origin: "https://page.test" },
-    body: JSON.stringify(body),
-  });
-const sessionOp = (operation) => ({ queries: [{ operationId: "0", operation, variables: {} }] });
-const lyricsOp = (id) => ({
-  queries: [{ operationId: "0", operation: "lyrics", variables: { id, auth: "SpicyLyrics-WebAuth" } }],
-  client: { version: "6.3.20" },
-});
+const TRACK = "4cOdK2wGLETKBW3PvgPWqT";
+const q = (id) => fetch(`${BASE}/v1/lyrics/${id}`, { headers: { Origin: "https://page.test" } });
 
 let host = startHost();
 await waitReady();
 
-// 1. Session ops are answered by the host, not forwarded.
-upstream.calls.length = 0;
-for (let d = 0; d < 4; d++) {
-  await q(sessionOp("pingConfig"));
-  await q(sessionOp("createSession"));
-  await q(sessionOp("ping"));
-}
-await new Promise((r) => setTimeout(r, 700));
-check("4 devices → 1 upstream createSession",
-  upstream.calls.filter((c) => c === "createSession").length === 1,
-  upstream.calls.join(","));
-check("client pings never leave the host", upstream.calls.filter((c) => c === "ping").length === 0);
-
-// 2. Concurrent identical lyric lookups share one upstream call.
-upstream.calls.length = 0;
-const burst = await Promise.all([0, 1, 2, 3].map(() => q(lyricsOp("TrackAAA"))));
-check("4 simultaneous lookups → 1 upstream lyrics call",
-  upstream.calls.filter((c) => c === "lyrics").length === 1,
-  `got ${upstream.calls.filter((c) => c === "lyrics").length}`);
+// 1. Concurrent identical lyric lookups share one upstream call, with the key.
+const burst = await Promise.all([0, 1, 2, 3].map(() => q(TRACK)));
+check("4 simultaneous lookups → 1 upstream call", upstream.calls.length === 1, `got ${upstream.calls.length}`);
 check("all four served", burst.every((r) => r.status === 200));
+check("the key reached the API as a bearer", upstream.auth[0] === `Bearer ${KEY}`);
 
-// 3. The disk-backed cache shim works.
+// 2. The disk-backed cache works.
 upstream.calls.length = 0;
-const second = await q(lyricsOp("TrackAAA"));
-check("repeat lookup → cache hit", second.headers.get("X-Spicy-Cache") === "hit",
-  second.headers.get("X-Spicy-Cache"));
+const second = await q(TRACK);
+check("repeat lookup → cache hit", second.headers.get("X-Spicy-Cache") === "hit", second.headers.get("X-Spicy-Cache"));
 check("repeat lookup → 0 upstream", upstream.calls.length === 0);
-check("cached body is the real one",
-  (await second.json()).queries[0].result.data.Type === "Syllable");
+check("cached body is the real one", (await second.json()).Body.Type === "Syllable");
 
-// 4. State survives a restart: both the lyric cache and the shared session.
+// 3. The lyric cache survives a restart.
 host.kill("SIGTERM");
 await new Promise((r) => setTimeout(r, 600));
 host = startHost();
 await waitReady();
 
 upstream.calls.length = 0;
-const afterRestart = await q(lyricsOp("TrackAAA"));
+const afterRestart = await q(TRACK);
 check("lyric cache survives a restart (served from disk)",
   afterRestart.headers.get("X-Spicy-Cache") === "hit",
   afterRestart.headers.get("X-Spicy-Cache"));
 check("and still costs nothing upstream", upstream.calls.length === 0);
 
 const stats = await (await fetch(`${BASE}/__spicy/stats`)).json();
-check("shared session survived the restart — no second createSession",
-  stats.sessionOpen === true && upstream.calls.filter((c) => c === "createSession").length === 0,
-  `sessionOpen=${stats.sessionOpen}`);
-check("stats show the gap between asked and forwarded",
-  stats.stats.clientOps >= 12 && stats.stats.createSession === 1,
-  `clientOps=${stats.stats.clientOps} createSession=${stats.stats.createSession}`);
+check("stats see the key, not its value", stats.keyKind === "secret" && !JSON.stringify(stats).includes(KEY));
 check("no upstream block seen against a normal host", stats.upstreamBlocked === null);
 
 // 5. The whole host works through an outbound SOCKS5 proxy, and really uses it.
@@ -177,9 +131,9 @@ host = startHost({ PROXY_URL: `socks5://127.0.0.1:${socks.server.address().port}
 await waitReady();
 
 upstream.calls.length = 0;
-const proxied = await q(lyricsOp("TrackViaProxy"));
+const proxied = await q("3n3Ppam7vgaVa1iaRUc9Lp");
 check("PROXY_URL: lyrics still resolve", proxied.status === 200);
-check("PROXY_URL: the upstream call reached the API", upstream.calls.includes("lyrics"));
+check("PROXY_URL: the upstream call reached the API", upstream.calls.includes("3n3Ppam7vgaVa1iaRUc9Lp"));
 check("PROXY_URL: and it went through the SOCKS5 proxy, not direct",
   socks.state.targets.some((t) => t.endsWith(`:${api.address().port}`)),
   socks.state.targets.join(",") || "(nothing brokered)");

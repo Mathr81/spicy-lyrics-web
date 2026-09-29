@@ -29,19 +29,20 @@ export const SCOPES: string[] = [
   "user-read-currently-playing",
 ];
 
-// Lyrics API base. If the API doesn't send permissive CORS headers for your
-// hosting origin, point this at a small CORS proxy you control via
-// VITE_LYRICS_API (see README → "CORS").
-export const LYRICS_API: string =
-  (import.meta as any).env?.VITE_LYRICS_API ?? "https://api.spicylyrics.org";
+// Lyrics API base: the bundled proxy (web/server/), which holds the Spicy Lyrics
+// API key and adds CORS. Set VITE_LYRICS_API to its public URL. The page calls
+// `GET {LYRICS_API}/v1/lyrics/{trackId}`.
+export const LYRICS_API: string = (
+  (import.meta as any).env?.VITE_LYRICS_API ?? "https://api.spicylyrics.org"
+).replace(/\/$/, "");
 
-// Sent as the `SpicyLyrics-Version` header and the body's `client.version`.
-// Deliberately NOT the extension's ProjectVersion: it must match the proxy's
-// CLIENT_VERSION (web/server), because a proxy without the version-stamping fix
-// forwards this body under its own header, and the API answers a mismatch with
-// `400 Invalid Request`. Bump the proxy first. See UPDATING.md.
-export const CLIENT_VERSION: string =
-  (import.meta as any).env?.VITE_SPICY_VERSION ?? "6.3.20";
+// Only for calling the API directly, without the proxy: a *publishable* key
+// (`sl_pk_…`, origin-allowlisted). Everything in this bundle is public, so the
+// build refuses a secret key (`sl_sk_…`) here — see vite.config.ts; it belongs
+// in the proxy's SPICY_API_KEY.
+export const LYRICS_API_KEY: string = String(
+  (import.meta as any).env?.VITE_SPICY_PUBLISHABLE_KEY ?? ""
+).trim();
 
 // The Web Playback SDK is unsupported in mobile browsers (iOS/iPadOS Safari,
 // most mobile Chrome). We detect that to fall back to Spotify Connect mirror.

@@ -11,7 +11,7 @@ look and animate identically to the extension.
 
 |                | Source |
 |----------------|--------|
-| Lyrics         | `api.spicylyrics.org` (same as the extension) |
+| Lyrics         | the official Spicy Lyrics API (`GET /v1/lyrics/{trackId}`), through the bundled proxy |
 | Auth           | Spotify OAuth 2.0 **PKCE** (no secret — safe for a static site) |
 | Playback/sync  | **Web Playback SDK** on desktop · **Spotify Connect mirror** on iPad |
 
@@ -35,7 +35,7 @@ Either edit `web/src/config.ts` (set `CLIENT_ID`), or provide build-time env var
 ```bash
 VITE_SPOTIFY_CLIENT_ID=xxxxxxxx
 VITE_SPOTIFY_REDIRECT_URI=https://yourname.github.io/spicy-lyrics/   # optional, defaults to the page's own URL
-VITE_LYRICS_API=https://api.spicylyrics.org                          # optional, see CORS below
+VITE_LYRICS_API=https://lyrics.example.com                           # your proxy, see below
 ```
 
 ## 3. Run / build
@@ -114,171 +114,128 @@ document is hidden and never restores it), and released as soon as playback
 pauses. Settings → **Garder l'écran allumé** turns it off; the row only appears
 where the API exists (Safari 16.4+ / iOS 16.4+, current Chromium).
 
-## API access — CORS & required headers (the proxy)
+## Lyrics API access — the key and the proxy
 
-The lyrics API is built for the Spotify desktop client and expects request
-headers a browser **cannot** set from a web page — `Origin`, `Referer` and
-`User-Agent` are "forbidden headers" the browser controls itself. It may also not
-send CORS headers for your hosting origin. So a direct browser call can be
-rejected.
+Lyrics come from the official Spicy Lyrics developer API:
 
-The fix is the included **proxy** (`web/server/`), which injects the expected
-headers server-side and adds permissive CORS. It is a plain Node process — one
-container, no dependencies, no database — so it runs on any VPS or home server:
+```http
+GET https://api.spicylyrics.org/v1/lyrics/{trackId}
+Authorization: Bearer sl_sk_…
+```
+
+It answers `{ "Body": <lyrics>, "Status": 200, "Type": "object" }`, where the
+body is the single best sync for the track (`Type` is `Syllable`, `Line` or
+`Static`) in the same shape the extension's engine already renders. Errors use
+the same envelope with `Body.error` (`lyrics_not_found`, `rate_limited`, …).
+
+The API needs a key, and a **secret key (`sl_sk_…`) must never reach a
+browser** — anything in the page's bundle is public. The API also sends no CORS
+headers for a secret key, so the page could not use one anyway. So the page
+talks to the included **proxy** (`web/server/`), which holds the key
+server-side:
 
 ```bash
 cd web/server
-cp .env.example .env     # put your sp_dc cookie in it (see "Synced lyrics")
-docker compose up -d     # listens on 127.0.0.1:8787
+cp .env.example .env     # put SPICY_API_KEY=sl_sk_… in it
+docker compose up -d     # see "Running the proxy" below
 ```
 
 Then set `VITE_LYRICS_API` to the proxy's public URL (as a GitHub Actions
-Variable, or in your local build env) and rebuild. The page will send its
-requests through the proxy, which forwards them to `api.spicylyrics.org` with:
+Variable, or in your local build env) and rebuild. The page asks
+`GET {VITE_LYRICS_API}/v1/lyrics/{trackId}` — the API's own path — and the proxy
+forwards it with the key and adds CORS. The key is never logged or returned.
 
-- `Origin: https://xpui.app.spotify.com`
-- `Referer: https://xpui.app.spotify.com/`
-- a Spotify-client `User-Agent`
-- `SpicyLyrics-Version` (the `CLIENT_VERSION` var, `6.3.20` by default)
+> The build **refuses** to run if any `VITE_*` variable holds an `sl_sk_` key,
+> since it would be published in the bundle.
 
-and passes your `SpicyLyrics-WebAuth` Bearer token straight through (never logged
-or stored).
+> **Without a proxy:** create a *publishable* key (`sl_pk_…`) with your site's
+> origin on its allowlist, set it as `VITE_SPICY_PUBLISHABLE_KEY`, and leave
+> `VITE_LYRICS_API` unset (it defaults to `https://api.spicylyrics.org`). The
+> page then sends that key itself. You lose the shared cache below, and a
+> publishable key also has a per-viewer IP limit.
 
-> Do not host it on Cloudflare Workers: the API's WAF refuses requests coming
-> from there (see "If the API blocks the proxy"). That is why this runs on an
-> ordinary machine.
+### One request per song, however many devices
 
-> If `api.spicylyrics.org` happens to allow your origin directly, you can skip the
-> proxy and leave `VITE_LYRICS_API` unset — but the proxy is the reliable path.
-
-### One client, however many devices
-
-The API's session model expects each client to open a session and keep it alive.
-Left alone, every browser does that for itself: four devices means four sessions,
-four ping loops and four identical lyric lookups for the same song — the exact
-traffic shape that gets a client rate-limited.
-
-The proxy collapses all of it into one upstream identity:
+The key has a request window per application (the `RateLimit-*` headers — 60
+per window at the time of writing), shared by every device using the proxy. The
+proxy keeps traffic well under it:
 
 | From the browsers | Reaches `api.spicylyrics.org` |
 |---|---|
-| `createSession` / `refreshSession` / `ping` / `pingConfig`, per device | nothing — answered by the proxy, which owns **one** shared session |
-| the shared session's keep-alive | one ping loop, on the API's own schedule, regardless of device count |
-| 4 devices starting the same song at once | **1** lyric request (in-flight coalescing) |
-| that song, ever again | **0** — served from the local cache for 7 days |
-| nobody listening for 30 min | **0** — the shared session is dropped, not pinged forever |
+| 4 devices starting the same song at once | **1** request (in-flight coalescing) |
+| that song, ever again | **0** — served from the proxy's cache for 7 days |
+| a song with no lyrics (`404`) | **1**, then **0** for an hour |
+| anything, once the window is exhausted (`429 rate_limited`) | **0** until it resets — the proxy answers `429` itself, cache hits keep working |
 
-One process is one hub, so "one session for every device" is simply what running
-it gets you. The session, its keep-alive schedule and the lyric cache are all
-persisted, so restarting the container costs nothing upstream.
+The page adds its own layer on top: every sync it has loaded is kept in
+`localStorage`, so a song you have already seen on a device never leaves it.
 
-Browsers still run their own session loop, but through the proxy it is local and
-free: the proxy answers with a proxy-local token and a 15-minute ping interval,
-and the page parks that timer entirely while it's in the background.
-
-Check what is actually going out:
+Check what is actually going out (the key is never shown):
 
 ```
 GET http://<your-proxy>/__spicy/stats
 {
-  "sessionOpen": true,
-  "stats": { "clientOps": 47, "createSession": 1, "ping": 3, "lyricsUpstream": 6, ... }
+  "keyConfigured": true,
+  "keyKind": "secret",
+  "rateLimit": { "limit": 60, "remaining": 57, "resetsInSeconds": 21, "coolingDownForSeconds": 0 },
+  "upstreamBlocked": null,
+  "stats": { "requests": 47, "cacheHits": 38, "coalesced": 3, "upstream": 6, ... }
 }
 ```
 
-`clientOps` is what the devices asked for; `ping` + `lyricsUpstream` is what was
-forwarded. The gap is the point.
+`requests` is what the devices asked for; `upstream` is what was forwarded. The
+gap is the point.
 
 Logs are one JSON object per line on stdout (`docker compose logs -f`). Filter on
-`evt`: `upstream` (a call that really left), `cache` (`hit` / `coalesced` /
-`miss`), `session_op_local`, `session_opened` / `session_dropped`. Set
-`LOG_LEVEL=debug` in `.env` to also see cache hits and per-device session ops.
+`evt`: `upstream` (a call that really left, with the remaining window), `cache`
+(`hit` / `coalesced` / `miss` / `cooldown`), `rate_limited`, `upstream_failed`.
+Set `LOG_LEVEL=debug` in `.env` to also see cache hits.
 
-Everything tunable is an environment variable (cache TTLs, the client ping
-interval, the idle timeout, `LOG_LEVEL`, `CLIENT_VERSION`) — `.env.example` lists
-them all. `npm test` inside `web/server/` runs offline tests that assert the
-"4 devices → 1 request" behaviour, end to end and across a restart.
+`npm test` inside `web/server/` runs offline tests for all of this, end to end
+and across a restart.
+
+### Credits for community syncs
+
+When a sync comes from the community (`source: "spicy_lyrics"`), the API includes
+`UploadAttribution` and asks clients to credit the uploader (and the maker, when
+there is one). The page shows it under the lyrics — "Made by @…", linking to the
+contributor's profile — alongside "Provided by: …" for every source.
 
 ### If the API blocks the proxy
 
-`api.spicylyrics.org` sits behind Cloudflare and its WAF can refuse traffic
-outright — including, as of this writing, requests coming from Cloudflare
-Workers, which is why this proxy runs on an ordinary machine instead. The symptom
-is a Cloudflare "Sorry, you have been blocked" HTML page where an API response
-should be, for *every* operation, so nothing loads and the shared session never
-opens.
-
-Two shapes of it, and the difference decides what to do:
-
-| What comes back | `kind` | What it means |
-|---|---|---|
-| `Sorry, you have been blocked` | `cloudflare-block` | the address is on a deny rule |
-| `Just a moment…` / `Verifying you are human` | `cloudflare-challenge` | the address is being challenged — typical for a datacenter/VPS IP |
-
-A challenge cannot be solved server-side (that is the point of it), so the fix is
-to leave from somewhere else: `PROXY_URL` (below) routes the proxy's own outbound
-traffic through a SOCKS5/HTTP proxy on a different network path. Nothing else in
-the setup needs to change.
-
-The proxy names this rather than letting it look like a lyrics error:
-
-- `/__spicy/stats` reports `upstreamBlocked: { count, lastAt, kind }` and
-  `sessionOpen: false`.
-- The logs carry `evt="upstream_blocked"` at `warn` level.
-- The page shows "L'API Spicy Lyrics refuse les requêtes du proxy" instead of a
-  generic failure, and the block page is never cached or handed to the JSON
-  parser. Detection is on the *content type*: the API answers `/query` with JSON
-  always, so any HTML body is something in front of it answering instead. (It
-  used to match on the page's wording, which missed the challenge page entirely.)
-
-To confirm it is the network path and not your setup, send the same request from
-a different machine — if that returns 200 while the proxy gets 403, the request
-shape is fine and the hosting location is what is being refused:
-
-```bash
-curl -s -X POST https://api.spicylyrics.org/query \
-  -H 'Content-Type: application/json' \
-  -H 'Origin: https://xpui.app.spotify.com' \
-  -H 'Referer: https://xpui.app.spotify.com/' \
-  -H 'SpicyLyrics-Version: 6.3.20' -H 'X-mode: 2' \
-  -d '{"queries":[{"operationId":"0","operation":"pingConfig","variables":{}}]}'
-```
-
-`/__spicy/tokencheck` returning `ok` at the same time confirms the `SP_DC`
-cookie is not the problem.
-
-The API's own response carries this notice: *"Access is granted solely for
-personal, individual use through official Spicy Lyrics clients or their public
-forks of official repositories."* Personal use through a fork is what this build
-is; the sensible fixes are to move the proxy to a different machine or network
-path (`PROXY_URL`, below) or to ask the Spicy Lyrics maintainers. Do not try to
-defeat the block by rotating addresses or disguising the client.
+`api.spicylyrics.org` sits behind Cloudflare. If its WAF ever refuses the
+proxy's network path, the answer is an HTML page ("Sorry, you have been blocked"
+or a "Just a moment…" challenge) instead of JSON. The proxy detects that on the
+content type, never caches it, answers `502` with `X-Spicy-Upstream: blocked`,
+reports it under `upstreamBlocked` in `/__spicy/stats` and logs
+`evt="upstream_blocked"`; the page says "L'API Spicy Lyrics refuse les requêtes
+du proxy" instead of a generic failure. `PROXY_URL` (below) routes the proxy's
+outbound traffic through a different network path.
 
 ## Running the proxy (`web/server/`)
 
-Two files: `proxy.mjs` is the logic (CORS, the minted web-player token, the
-shared session, coalescing) and `server.mjs` is the HTTP server plus the disk
-behind it — the lyric cache (memory in front of disk, so the 7-day cache survives
-a restart) and the hub's state in a JSON file. No dependencies at all: Node 20+
-already provides `fetch`, `Request`/`Response` and `crypto.subtle`.
+Two files: `proxy.mjs` is the logic (CORS, the API key, coalescing, the
+rate-limit cooldown) and `server.mjs` is the HTTP server plus the disk behind
+it — the lyric cache, memory in front of disk, so the 7-day cache survives a
+restart. No dependencies at all: Node 20+ already provides `fetch` and
+`Request`/`Response`.
 
 ### Docker Compose (recommended)
 
 ```bash
 cd web/server
-cp .env.example .env     # SP_DC at minimum
+cp .env.example .env     # SPICY_API_KEY at minimum
 docker compose up -d
 docker compose logs -f   # one JSON line per event
 ```
 
 The image is `node:22-alpine` plus three source files — nothing to install, so it
 builds in seconds and idles around 60–80 MB. The compose service runs read-only
-with all capabilities dropped, caps its own logs, and keeps the session and lyric
-cache in a named volume so restarts and upgrades cost nothing upstream.
+with all capabilities dropped, caps its own logs, and keeps the lyric cache in a
+named volume so restarts and upgrades cost nothing upstream.
 
-**No port is published on the host.** The proxy talks to the API as *your*
-Spotify account, so it is not something to leave listening on a machine's
-interfaces. Instead the container joins the reverse proxy's own Docker network —
+**No port is published on the host.** The proxy spends *your* API key's request
+window, so it is not something to leave listening on a machine's interfaces. Instead the container joins the reverse proxy's own Docker network —
 Nginx Proxy Manager's `npm_default` by default — and is reached there by
 container name:
 
@@ -310,28 +267,28 @@ Updating: `git pull && docker compose up -d --build`.
 
 ```bash
 cd web/server
-SP_DC='<your sp_dc cookie>' node server.mjs      # listens on :8787
-npm test                                          # offline end-to-end tests
+SPICY_API_KEY='sl_sk_…' node server.mjs      # listens on :8787
+npm test                                      # offline end-to-end tests
 ```
 
 `web/server/spicy-lyrics-proxy.service` is a hardened systemd unit for the same
-thing; put `SP_DC` in a `systemctl edit` drop-in rather than in the unit itself.
+thing; put `SPICY_API_KEY` in a `systemctl edit` drop-in rather than in the unit
+itself.
 
 ### Configuration
 
-All from the environment (and so from `.env` under compose): `SP_DC`, `PORT`
-(8787), `STATE_DIR` (`/state` in the container, `./.state` otherwise),
-`LOG_LEVEL`, `CLIENT_VERSION`, `LYRICS_CACHE_TTL`, `LYRICS_MISS_CACHE_TTL`,
-`CLIENT_PING_INTERVAL_MS`, `CLIENT_SESSION_TTL_S`, `SESSION_IDLE_MS`, and
-`API_ORIGIN` if you ever need to point it at a mirror.
+All from the environment (and so from `.env` under compose): `SPICY_API_KEY`
+(required), `PORT` (8787), `STATE_DIR` (`/state` in the container, `./.state`
+otherwise), `LOG_LEVEL`, `LYRICS_CACHE_TTL` (604800 s), `LYRICS_MISS_CACHE_TTL`
+(3600 s), and `API_ORIGIN` if you ever need to point it at a mirror.
 
 ### Sending the proxy's own traffic through another proxy
 
-`PROXY_URL` routes everything this process sends — the lyrics API *and*
-Spotify's token endpoints — through a SOCKS5 or HTTP CONNECT proxy:
+`PROXY_URL` routes everything this process sends to the lyrics API through a
+SOCKS5 or HTTP CONNECT proxy:
 
 ```bash
-PROXY_URL=socks5://127.0.0.1:1080 SP_DC='…' node server.mjs
+PROXY_URL=socks5://127.0.0.1:1080 SPICY_API_KEY='sl_sk_…' node server.mjs
 PROXY_URL=socks5://user:pass@127.0.0.1:1080 …     # with credentials
 PROXY_URL=http://127.0.0.1:3128 …                 # an HTTP CONNECT proxy
 PROXY_URL=127.0.0.1:1080 …                        # bare host:port means socks5
@@ -343,7 +300,7 @@ meant to change your exit path. `ALL_PROXY` works too.
 
 > `HTTPS_PROXY` / `HTTP_PROXY` are deliberately **not** picked up. They are
 > commonly set on a machine for unrelated reasons, and inheriting them silently
-> would reroute this process's traffic — Spotify tokens included — somewhere you
+> would reroute this process's traffic — API key included — somewhere you
 > never chose. If that is what you want, say it: `PROXY_URL="$HTTPS_PROXY"`.
 
 The startup log always states where outbound traffic goes, and a proxy that
@@ -431,57 +388,6 @@ Then set `VITE_LYRICS_API` to the host's URL and rebuild the page.
 > The Screen Wake Lock also needs a secure context, so HTTPS is required for the
 > iPad to stay awake.
 
-## Synced lyrics (the `SP_DC` secret)
-
-Spotify's **synced** (word/line-timed) lyrics come from an internal endpoint that
-only accepts Spotify's **web-player client token**. The extension has one (the
-desktop client mints it); a third-party OAuth app token — which is all a website
-can obtain — is **not** accepted there, so without extra setup the API can only
-return plain **unsynced text**.
-
-To get synced lyrics, the proxy mints a web-player token from your Spotify
-account cookie `sp_dc`, server-side:
-
-1. Log in to <https://open.spotify.com> in your browser.
-2. DevTools → **Application → Cookies → https://open.spotify.com** → copy the
-   value of the **`sp_dc`** cookie (a long string).
-3. Put it in `web/server/.env` as `SP_DC=...` (that file is git-ignored). It
-   stays server-side: it never reaches the browser and is never logged.
-   ```bash
-   cd web/server
-   cp .env.example .env
-   $EDITOR .env
-   docker compose up -d
-   ```
-
-`sp_dc` is long-lived (months) — treat it like a password. If lyrics go back to
-text-only, the cookie has expired; repeat the steps.
-
-### How the token is minted (TOTP) — and staying current
-
-Spotify mints the web-player token via `/api/token`, guarded by a **TOTP** (a
-time-based code, RFC 6238, from a per-version "secret cipher" + a version number
-`totpVer`). The proxy implements exactly what the web player / librespot do
-(TOTP verified against the RFC 6238 test vectors, key derived by XORing the
-cipher bytes with `(i % 33) + 9`).
-
-Spotify **rotates the cipher and bumps `totpVer`** to deter scraping, so the
-proxy **auto-updates**: it fetches the community-maintained cipher list
-([`xyloflake/spot-secrets-go`](https://github.com/xyloflake/spot-secrets-go))
-and uses the highest version (falling back to a baked-in copy, then to any older
-version that still works). No code change needed across most rotations.
-
-Verify minting works (never exposes the token):
-
-```
-GET http://<your-proxy>/__spicy/tokencheck
-→ { "ok": true, "totpVer": "61" }        # good
-→ { "ok": false, "reason": "..." }        # cookie expired or secret rotated
-```
-
-Manual overrides (rarely needed), as environment variables: `TOTP_SECRET` (a
-digit-string key), `TOTP_VER`, `SECRET_DICT_URL`, or `DISABLE_SECRET_FETCH=1`.
-
 ## How it works (architecture)
 
 `vite.config.ts` reuses the engine from `../src` and redirects a small set of
@@ -490,13 +396,13 @@ Spicetify-coupled modules to shims in `web/src/shim/`:
 | Original (`src/…`) | Shim | Why |
 |---|---|---|
 | `components/Global/SpotifyPlayer.ts` | `SpotifyPlayer.ts` | position clock + track state from the adapter |
-| `components/Global/Platform.ts` | `Platform.ts` | access token for the lyrics API |
+| `components/Global/Platform.ts` | `Platform.ts` | Spotify access token for the engine |
 | `components/Pages/PageView.ts` | `PageView.ts` | live `PageContainer` reference |
 | `components/Utils/Fullscreen.ts` | `Fullscreen.ts` | native Fullscreen API |
 | `components/Utils/CompactMode.ts` | `CompactMode.ts` | layout stub |
 | `components/DynamicBG/dynamicBackground.ts` | `dynamicBackground.ts` | Kawarp cover warp (no GraphQL colors / artist header) |
 | `utils/Lyrics/ProcessLyrics.ts` | `ProcessLyrics.ts` | drop on-device romanization CDN loads; use API transliterations |
-| `utils/Lyrics/Applyer/Credits/ApplyIsByCommunity.tsx` | `ApplyIsByCommunity.ts` | drop Spicetify-styled badge |
+| `utils/Lyrics/Applyer/Credits/ApplyIsByCommunity.tsx` | `ApplyIsByCommunity.ts` | community credit with plain links instead of Spicetify tooltips |
 
 Everything else — the animator, the Applyer, the virtualizer, the scroll engine,
 the CSS — is the **unmodified extension code**.

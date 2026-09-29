@@ -78,16 +78,12 @@ bun run web:preview  # smoke-test the lyrics render, sync, controls
 - **Build OK but something's broken at runtime** (e.g. lyrics don't sync, cover
   controls misbehave)? An interface a shim implements probably changed — open the
   matching file in `web/src/shim/` and realign it with the new upstream module.
-- **New API version?** Do **not** bump `CLIENT_VERSION` in
-  `web/src/config.ts` just because `project/config.ts` → `ProjectVersion` moved
-  (it is `6.3.98` while the web build and the proxy stay on `6.3.20`). Behind
-  the proxy it is the proxy's `CLIENT_VERSION` that reaches the API, and a
-  proxy older than its version-stamping fix forwards the page's body version
-  under its own header: the API rejects that mismatch with `400 Invalid
-  Request`, for every track not already cached. Bump the proxy first
-  (`CLIENT_VERSION` in its `.env`, then redeploy), check a fresh track through
-  it, and only then the page. If the lyrics API changed its session/query
-  protocol, update `web/src/lyrics/` and `web/server/proxy.mjs` too.
+- **Lyrics API changed?** The page and the proxy use the official developer
+  API (`GET /v1/lyrics/{trackId}`), which is versioned in its path and does not
+  depend on the extension's version — an upstream bump needs no change there.
+  The extension itself (`src/`) may keep its own `/query` client; the web build
+  does not use it. If the API ships a new version, update `web/src/lyrics/fetch.ts`
+  and `web/server/proxy.mjs` together.
 
 ## Finish
 

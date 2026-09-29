@@ -29,7 +29,6 @@ import {
 import { SpotifyPlayer } from "./shim/SpotifyPlayer.ts";
 import { type SimpleTrack } from "./spotify/api.ts";
 import { fetchLyrics } from "./lyrics/fetch.ts";
-import { initSession } from "./lyrics/session.ts";
 import { applyLyrics, clearLyrics } from "./lyrics/apply.ts";
 import {
   buildPage,
@@ -53,12 +52,15 @@ import Fullscreen from "./shim/Fullscreen.ts";
 
 const NOTICES: Record<string, string> = {
   "not-found": "Aucune parole disponible pour ce titre.",
-  queued: "Votre requête est dans la file d'attente — les paroles arrivent…",
+  busy: "L'API Spicy Lyrics est momentanément indisponible — réessaie dans un instant.",
+  "rate-limited": "Trop de requêtes vers l'API Spicy Lyrics — réessaie dans une minute.",
   error: "Une erreur est survenue lors du chargement des paroles.",
-  "no-auth": "Connexion Spotify requise.",
+  "no-key":
+    "L'API Spicy Lyrics refuse la clé du proxy (SPICY_API_KEY manquante ou révoquée). " +
+    "Voir /__spicy/stats sur le proxy.",
   blocked:
     "L'API Spicy Lyrics refuse les requêtes du proxy (blocage réseau en amont). " +
-    "Voir /__spicy/stats sur le Worker.",
+    "Voir /__spicy/stats sur le proxy.",
 };
 
 let currentTrackUri: string | null = null;
@@ -160,10 +162,6 @@ async function main(): Promise<void> {
   }
 
   shell.setLoggedIn(true);
-
-  // Open and keep an API lyrics session alive (the API rate-limits sessionless
-  // traffic). Runs in the background; lyric fetching works regardless.
-  initSession();
 
   // Mirror the active Spotify device by default. Playback in this tab (SDK) is
   // opt-in via the cover's "listen here" control — never grabbed on load.

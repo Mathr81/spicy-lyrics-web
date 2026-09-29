@@ -1,25 +1,30 @@
-// Fetch synced lyrics from the Spicy Lyrics API — same protocol as the
-// extension's `utils/Lyrics/fetchLyrics.ts` + `utils/API/Query.ts`, using the
-// real SLObjPack unpacker from the engine.
-import { SLObjPack } from "@src/utils/objpack.ts";
-import { LYRICS_API, CLIENT_VERSION } from "../config.ts";
-import { getAccessToken, invalidateAccessToken } from "../spotify/auth.ts";
-
-const packer = new SLObjPack();
+// Fetch lyrics from the official Spicy Lyrics API:
+//
+//   GET {LYRICS_API}/v1/lyrics/{trackId}   →  { Body: Lyrics, Status, Type }
+//
+// LYRICS_API is normally the bundled proxy (web/server/), which holds the API
+// key server-side and adds CORS. A secret key (`sl_sk_…`) must never be shipped
+// to a browser, so the page sends no key of its own unless a *publishable* one
+// (`sl_pk_…`) is configured for calling the API directly.
+//
+// The API's `Body` already has the engine's shape (Type / Content / Lead /
+// Syllables / Background, times in seconds); `toEngineShape` only renames the
+// two fields the Applyer reads under older names.
+import { LYRICS_API, LYRICS_API_KEY } from "../config.ts";
 
 export type LyricsResult =
   | { ok: true; data: any }
   | {
       ok: false;
-      reason: "not-found" | "queued" | "error" | "no-auth" | "blocked";
+      reason: "not-found" | "busy" | "rate-limited" | "error" | "no-key" | "blocked";
       status: number;
     };
 
 const cache = new Map<string, any>();
 
 // Persist fetched lyrics across sessions so revisiting a track never re-hits the
-// API — the API rate-limits repeated queries, so cutting request volume directly
-// helps. Lyrics are effectively immutable per track, so no TTL is needed.
+// API — the key has a request window, so cutting request volume directly helps.
+// Lyrics are effectively immutable per track, so no TTL is needed.
 const STORE_PREFIX = "sl_lyrics_v1_";
 
 function readPersisted(trackId: string): any | null {
@@ -51,36 +56,39 @@ function writePersisted(trackId: string, data: any): void {
   }
 }
 
-/** The result of our single query in a `/query` envelope. */
-function pickResult(json: any): any {
-  return json?.queries?.find((q: any) => q.operationId === "0")?.result ?? json?.queries?.[0]?.result;
+// The API names its catalogues in full; the Applyer's credit line and
+// community badge match on the extension's short codes.
+const SOURCE_CODES: Record<string, string> = {
+  spicy_lyrics: "spl",
+  apple_music: "aml",
+  spotify: "spt",
+};
+
+function toEngineShape(body: any, trackId: string): any {
+  const data = { ...body };
+  if (typeof data.source === "string") data.source = SOURCE_CODES[data.source] ?? data.source;
+  // The engine reads a community sync's credits from `TTMLUploadMetadata`.
+  if (data.UploadAttribution && !data.TTMLUploadMetadata) {
+    data.TTMLUploadMetadata = data.UploadAttribution;
+  }
+  data.uri = `spotify:track:${trackId}`;
+  return data;
 }
 
-/** One `/query` call for a track's lyrics with the given bearer token. */
-async function queryLyrics(trackId: string, token: string): Promise<Response> {
-  return fetch(`${LYRICS_API}/query`, {
-    method: "POST",
-    // Note: browsers forbid setting `Origin`, `Referer` and `User-Agent` from
-    // fetch. If the API requires the Spotify-client values for those, route
-    // LYRICS_API through the bundled proxy (web/server/), which injects them
-    // server-side. These are the headers we CAN set from the page.
-    headers: {
-      Accept: "*/*",
-      "Content-Type": "application/json",
-      "SpicyLyrics-Version": CLIENT_VERSION,
-      "X-mode": "2",
-      "SpicyLyrics-WebAuth": `Bearer ${token}`,
-    },
-    body: JSON.stringify({
-      queries: [
-        {
-          operation: "lyrics",
-          variables: { id: trackId, auth: "SpicyLyrics-WebAuth" },
-        },
-      ],
-      client: { version: CLIENT_VERSION },
-    }),
-  });
+function failure(status: number, code: string | undefined): LyricsResult {
+  if (status === 404) return { ok: false, reason: "not-found", status };
+  // `rate_limited` is our key's window; `upstream_rate_limited` is the API's
+  // own provider throttling this lookup, which is nothing we did.
+  if (status === 429 && code !== "upstream_rate_limited") {
+    return { ok: false, reason: "rate-limited", status };
+  }
+  if (status === 429 || status === 502 || status === 503) {
+    return { ok: false, reason: "busy", status };
+  }
+  if (status === 401 || status === 403 || code === "proxy_not_configured") {
+    return { ok: false, reason: "no-key", status };
+  }
+  return { ok: false, reason: "error", status };
 }
 
 export async function fetchLyrics(trackId: string): Promise<LyricsResult> {
@@ -91,62 +99,46 @@ export async function fetchLyrics(trackId: string): Promise<LyricsResult> {
     return { ok: true, data: persisted };
   }
 
-  const token = await getAccessToken();
-  if (!token) return { ok: false, reason: "no-auth", status: 401 };
-
   let res: Response;
   try {
-    res = await queryLyrics(trackId, token);
+    res = await fetch(`${LYRICS_API}/v1/lyrics/${encodeURIComponent(trackId)}`, {
+      headers: {
+        Accept: "application/json",
+        ...(LYRICS_API_KEY ? { Authorization: `Bearer ${LYRICS_API_KEY}` } : {}),
+      },
+    });
   } catch (err) {
     console.error("[SpicyLyrics] lyrics request failed", err);
     return { ok: false, reason: "error", status: 0 };
   }
 
   // The bundled proxy sets this when api.spicylyrics.org answered with a
-  // Cloudflare block page instead of an API response: the request never reached
-  // the API, so it is neither a missing-lyrics case nor anything a retry fixes.
+  // Cloudflare page instead of JSON: the request never reached the API, so it is
+  // neither a missing-lyrics case nor anything a retry fixes.
   if (res.headers.get("X-Spicy-Upstream") === "blocked") {
     return { ok: false, reason: "blocked", status: res.status };
   }
-  if (!res.ok) return { ok: false, reason: "error", status: res.status };
 
-  let result = pickResult(await res.json());
-  if (!result) return { ok: false, reason: "not-found", status: 404 };
-
-  // The envelope 401: the token we sent was already dead, whatever its stated
-  // expiry said. Retire it and try once more with a fresh one — once only, so a
-  // genuinely unauthorized client can't loop. (Mirrors the extension's
-  // `utils/Lyrics/fetchLyrics.ts`.)
-  if (result.httpStatus === 401) {
-    invalidateAccessToken(token);
-    const retryToken = await getAccessToken();
-    if (retryToken && retryToken !== token) {
-      try {
-        const retry = await queryLyrics(trackId, retryToken);
-        // Keep the original 401 if the retry came back shapeless — it is the
-        // more accurate answer of the two.
-        if (retry.ok) result = pickResult(await retry.json()) ?? result;
-      } catch (err) {
-        console.error("[SpicyLyrics] lyrics retry failed", err);
-      }
-    }
-  }
-
-  const status = result.httpStatus;
-  if (status === 503) return { ok: false, reason: "queued", status };
-  if (status === 404) return { ok: false, reason: "not-found", status };
-  if (status !== 200) return { ok: false, reason: "error", status };
-
-  let data: any;
+  let json: any = null;
   try {
-    data = packer.unpack(result.data);
-  } catch (err) {
-    console.error("[SpicyLyrics] failed to unpack lyrics", err);
-    return { ok: false, reason: "error", status: 500 };
+    json = await res.json();
+  } catch {
+    /* not JSON — handled below */
   }
-  if (!data) return { ok: false, reason: "not-found", status: 404 };
 
-  data.uri = `spotify:track:${trackId}`;
+  if (!res.ok) {
+    const code = json?.Body?.error;
+    if (code) console.warn(`[SpicyLyrics] lyrics API: ${code} — ${json.Body.message ?? ""}`);
+    return failure(res.status, code);
+  }
+
+  const body = json?.Body;
+  if (!body || typeof body.Type !== "string") {
+    console.error("[SpicyLyrics] unexpected lyrics payload", json);
+    return { ok: false, reason: "error", status: res.status };
+  }
+
+  const data = toEngineShape(body, trackId);
   cache.set(trackId, data);
   writePersisted(trackId, data);
   return { ok: true, data };

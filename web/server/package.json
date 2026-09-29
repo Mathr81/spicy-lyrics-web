@@ -1,9 +1,9 @@
 {
   "name": "spicy-lyrics-proxy",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "private": true,
   "type": "module",
-  "description": "CORS + token-injecting proxy for the Spicy Lyrics API: one shared API session and one upstream lyric fetch for every connected device.",
+  "description": "Key-holding CORS proxy for the official Spicy Lyrics API: one cached, coalesced upstream request per song for every connected device.",
   "scripts": {
     "start": "node server.mjs",
     "test": "node proxy.test.mjs && node server.test.mjs && node outbound.test.mjs",

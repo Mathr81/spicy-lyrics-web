@@ -1,97 +1,41 @@
-// The Spicy Lyrics proxy — CORS + header/token injection AND shared-identity
-// front end for the Spicy Lyrics API. Plain Node, no platform runtime.
+// The Spicy Lyrics proxy — the page's front end for the official Spicy Lyrics
+// developer API (`GET https://api.spicylyrics.org/v1/lyrics/{trackId}`).
+// Plain Node, no platform runtime.
 //
 // This module is the logic; `server.mjs` is the HTTP server and the disk that
-// back it. Four jobs:
+// back it. Three jobs:
 //
-// 1. Inject the request headers a browser can't set (Origin/Referer/User-Agent)
-//    and add permissive CORS, so the page can reach the API at all.
+// 1. **Hold the key.** The API authenticates with a key sent as
+//    `Authorization: Bearer sl_sk_…`. A secret key must never reach a browser,
+//    and the API sends no CORS headers for one anyway, so the page cannot call
+//    it directly. The page asks this proxy instead; the proxy adds the key
+//    (`SPICY_API_KEY`, from the environment) and permissive CORS. The key is
+//    never logged and never returned.
 //
-// 2. **Synced lyrics token.** Spotify's synced-lyrics endpoint only accepts the
-//    official web-player client token. A third-party OAuth app token (all a
-//    website can get) unlocks plain text only. With an `SP_DC` secret (your
-//    Spotify account cookie), the proxy mints a web-player token server-side and
-//    uses it as the lyrics bearer. The cookie never reaches the browser and is
-//    never logged.
+// 2. **One lyric request per song.** Lookups are coalesced (concurrent requests
+//    for the same track share one upstream fetch) and cached: found lyrics for a
+//    week, a definite "no lyrics" for an hour. Four devices starting the same
+//    song produce one upstream call; every later play of it produces none.
 //
-// 3. **One identity, N devices.** The API's session model expects a client to
-//    open a session and keep it alive. Every browser doing that on its own means
-//    4 devices = 4 sessions, 4 ping loops and 4 identical lyric lookups — which
-//    is exactly the traffic pattern that gets a client rate-limited or flagged.
-//    So session lifecycle ops (`createSession` / `refreshSession` / `ping` /
-//    `pingConfig`) are **answered locally** and never forwarded per-client: one
-//    `SessionHub` owns ONE upstream session for the whole deployment and keeps
-//    it alive on its own timer, whether one device is connected or ten.
+// 3. **Respect the rate limit.** The key has a request window per application
+//    (`RateLimit-*` headers). When the API answers `429 rate_limited`, the proxy
+//    stops forwarding until the window resets and answers `429` itself in the
+//    meantime, instead of hammering an exhausted window. Cache hits keep being
+//    served throughout.
 //
-// 4. **One lyric request per song.** Lyric lookups are coalesced (concurrent
-//    requests for the same track share a single upstream fetch) and then cached.
-//    Four devices starting the same song at the same moment produce exactly one
-//    upstream call; every later play of that song produces none.
-//
-// Token minting mirrors what the web player / librespot do: call
-//    GET https://open.spotify.com/api/token?...&totp=<code>&totpVer=<ver>
-// with a TOTP (RFC 6238, HMAC-SHA1, 30s, 6 digits) over Spotify's server time.
-// The TOTP key comes from a per-version "secret cipher" that Spotify rotates and
-// bumps (`totpVer`). We ship the known ciphers AND fetch the community-maintained
-// list so this keeps working across rotations without a code change.
-//
-// Run it with Docker Compose (see web/server/README-ish notes in web/README.md):
-//    cd web/server && cp .env.example .env   # put your sp_dc in it
+// Run it with Docker Compose (see web/README.md):
+//    cd web/server && cp .env.example .env   # put SPICY_API_KEY in it
 //    docker compose up -d
 //
-// Verify (no token exposed):
-//    GET http://<host>:8787/__spicy/tokencheck   # can we mint a token?
-//    GET http://<host>:8787/__spicy/stats        # how much upstream traffic?
+// Verify (the key is never exposed):
+//    GET http://<host>:8787/__spicy/stats
 
 const API_ORIGIN = "https://api.spicylyrics.org";
-const SPOTIFY_ORIGIN = "https://xpui.app.spotify.com";
-const SPOTIFY_UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.179 Spotify/1.2.94.583 Safari/537.36";
 
-// Community-maintained list of per-version TOTP secret ciphers. Keeps the proxy
-// working when Spotify rotates the secret. Override/disable via env.
-
-const SECRET_DICT_URL =
-  "https://raw.githubusercontent.com/xyloflake/spot-secrets-go/main/secrets/secretDict.json";
-
-// Baked-in fallback (used if the fetch fails). Keep the highest last.
-const FALLBACK_SECRET_CIPHER = {
-  59: [123, 105, 79, 70, 110, 59, 52, 125, 60, 49, 80, 70, 89, 75, 80, 86, 63, 53, 123, 37, 117, 49, 52, 93, 77, 62, 47, 86, 48, 104, 68, 72],
-  60: [79, 109, 69, 123, 90, 65, 46, 74, 94, 34, 58, 48, 70, 71, 92, 85, 122, 63, 91, 64, 87, 87],
-  61: [44, 55, 47, 42, 70, 40, 34, 114, 76, 74, 50, 111, 120, 97, 75, 76, 94, 102, 43, 69, 49, 120, 118, 80, 64, 78],
-};
-
-// Session-lifecycle operations. These never reach the upstream API per client —
-// the shared session hub answers them (see `sessionEnvelope`).
-const SESSION_OPS = new Set([
-  "createSession",
-  "refreshSession",
-  "ping",
-  "pingConfig",
-]);
-
-// The token clients get back for their "session". Deliberately NOT the real
-// upstream token: the browser has no use for it, and handing it out would let a
-// client talk to the API directly under the shared identity, defeating the point.
-const CLIENT_TOKEN = "spicy-proxy-shared-session";
-
-// What the upstream API asks of a well-behaved client, until `pingConfig` tells
-// us otherwise. Only the hub uses these — clients get `clientPingConfig()`.
-const UPSTREAM_DEFAULTS = {
-  pingIntervalMs: 300000,
-  minPingIntervalMs: 240000,
-  sessionTtlSeconds: 3600,
-  refreshAtTtlFraction: 0.8,
-};
-
-const OK = 200;
-const SESSION_DEAD = 403;
-const CREATE_BACKOFF_BASE_MS = 15000;
-const CREATE_BACKOFF_MAX_MS = 900000; // 15 min — a dead cookie must not be retried hot
-// Every upstream call waits on the minted token, so a token fetch that hangs
-// wedges the whole proxy. Bound it: falling back to "no token" degrades to
-// unsynced lyrics, which is far better than never answering.
-const MINT_TIMEOUT_MS = 8000;
+// A Spotify track id: 22 base62 characters. Checked here too so a malformed id
+// costs nothing upstream.
+const TRACK_ID = /^[A-Za-z0-9]{22}$/;
+const LYRICS_PATH = /^\/v1\/lyrics\/([^/]+)\/?$/;
 
 // --- config -----------------------------------------------------------------
 
@@ -108,21 +52,26 @@ function cfg(env) {
     // Overridable so the proxy can be pointed at a mirror — and so the host's
     // end-to-end tests can run against a stub instead of the real API.
     apiOrigin: (e.API_ORIGIN || API_ORIGIN).replace(/\/$/, ""),
+    apiKey: String(e.SPICY_API_KEY || "").trim(),
     logLevel: LEVELS[String(e.LOG_LEVEL || "info").toLowerCase()] ?? LEVELS.info,
-    clientVersion: e.CLIENT_VERSION || "6.3.20",
     lyricsCacheTtl: num(e.LYRICS_CACHE_TTL, 604800),
     lyricsMissCacheTtl: num(e.LYRICS_MISS_CACHE_TTL, 3600),
-    clientPingIntervalMs: num(e.CLIENT_PING_INTERVAL_MS, 900000),
-    clientSessionTtlS: num(e.CLIENT_SESSION_TTL_S, 86400),
-    sessionIdleMs: num(e.SESSION_IDLE_MS, 1800000),
   };
+}
+
+// `sl_sk_…` → "secret", `sl_pk_…` → "publishable". Reported by /__spicy/stats
+// so an operator can check which key is loaded without it being printed.
+export function keyKind(key) {
+  if (!key) return null;
+  if (key.startsWith("sl_sk_")) return "secret";
+  if (key.startsWith("sl_pk_")) return "publishable";
+  return "unknown";
 }
 
 // Structured logging: one JSON object per line on stdout, so `docker compose
 // logs` can be filtered on a field — `evt="upstream"` for calls that really
 // reached api.spicylyrics.org, `evt="cache"` for lookups (state=hit | coalesced
-// | miss), `evt="session_opened"` / `"session_dropped"` for lifecycle.
-// `LOG_LEVEL` tunes the volume.
+// | miss). `LOG_LEVEL` tunes the volume.
 function makeLog(env, where) {
   const min = cfg(env).logLevel;
   return (level, evt, fields) => {
@@ -137,101 +86,58 @@ function corsHeaders(request) {
   const origin = request.headers.get("Origin") || "*";
   return {
     "Access-Control-Allow-Origin": origin,
-    "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-    "Access-Control-Allow-Headers":
-      "Content-Type, SpicyLyrics-Version, SpicyLyrics-WebAuth, X-mode, Accept, Authorization",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Headers": "Accept, Authorization, Content-Type",
+    "Access-Control-Expose-Headers":
+      "RateLimit-Limit, RateLimit-Remaining, RateLimit-Reset, Retry-After, X-Spicy-Cache, X-Spicy-Upstream",
     "Access-Control-Max-Age": "86400",
     Vary: "Origin",
   };
 }
 
-// --- request classification -------------------------------------------------
+// --- responses ----------------------------------------------------------------
 
-// Sort an incoming `/query` body into the three paths that matter:
-//   session  — lifecycle ops, answered locally, never forwarded per client
-//   lyrics   — a single track lookup: coalesced + edge-cached
-//   other    — anything else: plain passthrough, as before
-function classify(bodyBuffer) {
-  try {
-    const parsed = JSON.parse(new TextDecoder().decode(bodyBuffer));
-    const queries = Array.isArray(parsed?.queries) ? parsed.queries : [];
-    if (!queries.length) return { type: "other" };
-    if (queries.every((q) => SESSION_OPS.has(q?.operation))) {
-      return { type: "session", queries };
-    }
-    if (queries.length === 1 && queries[0]?.operation === "lyrics") {
-      const id = queries[0]?.variables?.id;
-      if (typeof id === "string" && /^[A-Za-z0-9]{1,64}$/.test(id)) {
-        return { type: "lyrics", id };
-      }
-    }
-    return { type: "other" };
-  } catch {
-    return { type: "other" };
-  }
+// The API's own error shape, so the page parses the proxy's errors exactly like
+// the API's.
+function errorEnvelope(status, error, message) {
+  return JSON.stringify({ Body: { error, message }, Status: status, Type: "object" });
 }
 
-// A Cloudflare challenge/block page from the upstream zone, rather than an API
-// response. Worth naming explicitly: it is not a lyrics error, not a bad token
-// and not something a retry fixes — the request never reached the API. Detected
-// so it can be logged, reported by /__spicy/stats and shown to the user as what
-// it is instead of a generic failure.
-function blockedLyricsResult() {
-  const body = JSON.stringify({
-    error: "upstream-blocked",
-    queries: [
-      {
-        operationId: "0",
-        operation: "lyrics",
-        result: { httpStatus: 403, data: null },
-      },
-    ],
+function errorResponse(status, error, message, headers) {
+  return new Response(errorEnvelope(status, error, message), {
+    status,
+    headers: { "Content-Type": "application/json", ...headers },
   });
-  return {
-    status: 403,
-    contentType: "application/json",
-    buf: new TextEncoder().encode(body).buffer,
-    blocked: true,
-  };
 }
 
-// The API answers `/query` with JSON — always, including for its own errors. So
-// an HTML body is never the API talking: something in front of it answered
-// instead, and the request did not reach the API.
-//
-// Deliberately NOT matched on the text of the page. An earlier version looked
-// for "Attention Required" / "you have been blocked" / "Cloudflare Ray ID" and
-// missed the managed-challenge page ("Just a moment…"), which carries none of
-// them — so the HTML went straight to the page's JSON parser, which is the one
-// outcome this check exists to prevent. The content type is the reliable
-// signal; the wording is Cloudflare's to change.
+function json(obj, extraHeaders) {
+  return new Response(JSON.stringify(obj), {
+    headers: { "Content-Type": "application/json", ...extraHeaders },
+  });
+}
+
+// The API answers with JSON — always, including for its own errors. So an HTML
+// body is never the API talking: something in front of it (a Cloudflare block
+// or challenge page) answered instead, and the request did not reach the API.
+// Detected on the content type, never on the page's wording.
 function isUpstreamBlock(contentType) {
   return /text\/html/i.test(contentType || "");
 }
 
-// Which kind of wall it was, for the log line only. Never a condition: an
-// unrecognised HTML page is still a page instead of an API response.
-function blockKind(buf) {
+// The API's machine-readable error code (`Body.error`), if the body has one.
+function errorCode(buf) {
   try {
-    const head = new TextDecoder().decode(buf.slice(0, 4096));
-    if (/Just a moment|cf[-_]chl|challenge-platform|Enable JavaScript and cookies/i.test(head)) {
-      return "cloudflare-challenge";
-    }
-    if (/Attention Required|cf-error|you have been blocked/i.test(head)) {
-      return "cloudflare-block";
-    }
-    if (/Cloudflare/i.test(head)) return "cloudflare-other";
-    return "html-page";
+    const parsed = JSON.parse(new TextDecoder().decode(buf));
+    return typeof parsed?.Body?.error === "string" ? parsed.Body.error : null;
   } catch {
-    return "unknown";
+    return null;
   }
 }
 
 // Node's fetch rejects with a bare `TypeError: fetch failed` and puts the real
 // reason in `cause` — ECONNREFUSED, ENOTFOUND, a TLS failure, or one of
 // outbound.mjs's own messages when a configured PROXY_URL cannot be reached.
-// Logging the error by itself therefore says nothing at all, which is the
-// opposite of what someone staring at a 502 needs. Walk the chain instead.
+// Walk the chain so the log line says something useful.
 function describeError(err) {
   const parts = [];
   let e = err;
@@ -244,766 +150,231 @@ function describeError(err) {
   return parts.join(" <- ");
 }
 
-// The /query endpoint returns HTTP 200 with a per-operation `httpStatus` inside;
-// pull that inner status so we only cache real results (200) / definite misses
-// (404), never queued (503) or transient errors.
-function innerStatus(bodyBuffer) {
-  try {
-    const parsed = JSON.parse(new TextDecoder().decode(bodyBuffer));
-    const queries = Array.isArray(parsed?.queries) ? parsed.queries : [];
-    const result =
-      queries.find((q) => q?.operationId === "0")?.result ?? queries[0]?.result;
-    return typeof result?.httpStatus === "number" ? result.httpStatus : 0;
-  } catch {
-    return 0;
-  }
-}
-
-// What we tell clients to do with their (proxy-local) session. Long intervals:
-// these pings cost nothing upstream, so there is no reason for four devices to
-// wake up every five minutes. The hub keeps the *real* session alive on the
-// upstream schedule regardless of what clients do.
-function clientPingConfig(c) {
-  return {
-    pingIntervalMs: c.clientPingIntervalMs,
-    minPingIntervalMs: c.clientPingIntervalMs,
-    sessionTtlSeconds: c.clientSessionTtlS,
-    refreshAtTtlFraction: 0.9,
-  };
-}
-
-// Build the `/query` response shape the client parses, for ops we answer here.
-function sessionEnvelope(queries, c) {
-  return {
-    queries: queries.map((q, i) => {
-      const op = q?.operation;
-      let data;
-      if (op === "createSession" || op === "refreshSession") data = { tk: CLIENT_TOKEN };
-      else if (op === "pingConfig") data = clientPingConfig(c);
-      else data = { ok: true };
-      return {
-        operationId: q?.operationId ?? String(i),
-        operation: op,
-        result: { httpStatus: OK, data },
-      };
-    }),
-  };
-}
-
-function openSpotifyHeaders(env) {
-  const h = {
-    "User-Agent": SPOTIFY_UA,
-    Accept: "application/json",
-    Origin: "https://open.spotify.com",
-    Referer: "https://open.spotify.com/",
-    "App-Platform": "WebPlayer",
-  };
-  if (env && env.SP_DC) h.Cookie = `sp_dc=${env.SP_DC}`;
-  return h;
-}
-
-// Headers for an upstream Spicy Lyrics call. `auth` is the minted web-player
-// token (or null); session ops additionally need it in `Authorization`.
-function upstreamHeaders(env, auth, withAuthorization) {
-  const c = cfg(env);
-  const h = new Headers();
-  h.set("Accept", "*/*");
-  h.set("Content-Type", "application/json");
-  h.set("Origin", SPOTIFY_ORIGIN);
-  h.set("Referer", SPOTIFY_ORIGIN + "/");
-  h.set("User-Agent", SPOTIFY_UA);
-  h.set("X-mode", "2");
-  h.set("SpicyLyrics-Version", c.clientVersion);
-  if (auth) {
-    h.set("SpicyLyrics-WebAuth", `Bearer ${auth}`);
-    if (withAuthorization) h.set("Authorization", `Bearer ${auth}`);
-  }
-  return h;
-}
-
-// The page's lyrics query goes upstream as the page wrote it, but under our
-// headers, and the API answers `400 Invalid Request` when the body's
-// `client.version` disagrees with the `SpicyLyrics-Version` header. A page built
-// for a newer (or older) release than this proxy's CLIENT_VERSION would then get
-// nothing for every track not already cached. Stamp our own version on the body
-// so the two always match, whatever the page was built with.
-function withOwnVersion(bodyText, version) {
-  try {
-    const body = JSON.parse(bodyText);
-    if (!body || typeof body !== "object") return bodyText;
-    body.client = { ...(body.client ?? {}), version };
-    return JSON.stringify(body);
-  } catch {
-    return bodyText;
-  }
-}
-
-// --- TOTP (RFC 6238) via Web Crypto -----------------------------------------
-function counterBytes(counter) {
-  const buf = new Uint8Array(8);
-  let c = counter;
-  for (let i = 7; i >= 0; i--) {
-    buf[i] = c & 0xff;
-    c = Math.floor(c / 256);
-  }
-  return buf;
-}
-
-async function totp(secretStr, timeSeconds, period = 30, digits = 6) {
-  const keyBytes = new TextEncoder().encode(secretStr);
-  const key = await crypto.subtle.importKey(
-    "raw",
-    keyBytes,
-    { name: "HMAC", hash: "SHA-1" },
-    false,
-    ["sign"]
-  );
-  const counter = Math.floor(timeSeconds / period);
-  const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, counterBytes(counter)));
-  const offset = sig[sig.length - 1] & 0x0f;
-  const bin =
-    ((sig[offset] & 0x7f) << 24) |
-    ((sig[offset + 1] & 0xff) << 16) |
-    ((sig[offset + 2] & 0xff) << 8) |
-    (sig[offset + 3] & 0xff);
-  return (bin % 10 ** digits).toString().padStart(digits, "0");
-}
-
-// Spotify's key derivation: XOR each cipher byte with ((index % 33) + 9), then
-// join the resulting decimal values into one string used as the TOTP key.
-function secretStringFromCipher(cipher) {
-  return cipher.map((e, t) => e ^ ((t % 33) + 9)).join("");
-}
-
-async function getServerTime(env) {
-  try {
-    const res = await fetch("https://open.spotify.com/api/server-time", {
-      headers: openSpotifyHeaders(env),
-      signal: AbortSignal.timeout(MINT_TIMEOUT_MS),
-    });
-    const json = await res.json();
-    if (json && json.serverTime) return Number(json.serverTime);
-  } catch {
-    /* fall through */
-  }
-  return Math.floor(Date.now() / 1000);
-}
-
-let secretDictCache = null; // { dict, at }
-
-async function getSecretDict(env) {
-  if (env && env.DISABLE_SECRET_FETCH === "1") return FALLBACK_SECRET_CIPHER;
-  if (secretDictCache && Date.now() - secretDictCache.at < 6 * 3600_000) {
-    return secretDictCache.dict;
-  }
-  try {
-    const url = (env && env.SECRET_DICT_URL) || SECRET_DICT_URL;
-    const res = await fetch(url, {
-      headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(MINT_TIMEOUT_MS),
-    });
-    if (res.ok) {
-      const dict = await res.json();
-      if (dict && typeof dict === "object" && Object.keys(dict).length) {
-        secretDictCache = { dict, at: Date.now() };
-        return dict;
-      }
-    }
-  } catch {
-    /* fall through */
-  }
-  secretDictCache = { dict: FALLBACK_SECRET_CIPHER, at: Date.now() };
-  return FALLBACK_SECRET_CIPHER;
-}
-
-// Cache the minted web-player token for the life of the isolate.
-let cachedToken = null; // { accessToken, expiresAt, version }
-let mintingToken = null; // in-flight mint, so concurrent callers share one
-
-async function mintToken(env) {
-  const dict = await getSecretDict(env);
-  const versions = env && env.TOTP_VER
-    ? [String(env.TOTP_VER)]
-    : Object.keys(dict).sort((a, b) => Number(b) - Number(a)); // highest first
-  const t = await getServerTime(env);
-
-  for (const ver of versions) {
-    const secret = (env && env.TOTP_SECRET) || (dict[ver] && secretStringFromCipher(dict[ver]));
-    if (!secret) continue;
-    const code = await totp(secret, t);
-    for (const reason of ["transport", "init"]) {
-      const url =
-        `https://open.spotify.com/api/token?reason=${reason}&productType=web-player` +
-        `&totp=${code}&totpServer=${code}&totpVer=${ver}`;
-      try {
-        const res = await fetch(url, {
-          headers: openSpotifyHeaders(env),
-          signal: AbortSignal.timeout(MINT_TIMEOUT_MS),
-        });
-        if (!res.ok) continue;
-        const json = await res.json().catch(() => null);
-        if (json && json.accessToken && !json.isAnonymous) {
-          return {
-            accessToken: json.accessToken,
-            expiresAt: json.accessTokenExpirationTimestampMs ?? Date.now() + 3_300_000,
-            version: ver,
-          };
-        }
-      } catch {
-        /* try next */
-      }
-    }
-  }
-  return null;
-}
-
-async function getWebPlayerToken(env) {
-  if (!env || !env.SP_DC) return null;
-  if (cachedToken && Date.now() < cachedToken.expiresAt - 60_000) {
-    return cachedToken.accessToken;
-  }
-  // Coalesce: a burst of requests after expiry must mint once, not N times.
-  if (!mintingToken) {
-    mintingToken = mintToken(env).finally(() => {
-      mintingToken = null;
-    });
-  }
-  const minted = await mintingToken;
-  if (!minted) return null;
-  cachedToken = minted;
-  return minted.accessToken;
-}
-
-// ---------------------------------------------------------------------------
-// Shared session hub
-// ---------------------------------------------------------------------------
-
-export class SessionHub {
-  constructor(env, store) {
-    this.env = env;
-    this.store = store;
-    this.log = makeLog(env, "hub");
-    this.inflight = new Map(); // trackId -> Promise<{status, contentType, buf}>
-    this.creating = null;
-    this.timer = null;
-    this.ready = (async () => {
-      this.s = (await store.load()) || {
-        tk: null,
-        createdAt: 0,
-        lastUpstreamAt: 0,
-        lastClientAt: 0,
-        nextCreateAt: 0,
-        createBackoff: CREATE_BACKOFF_BASE_MS,
-        config: { ...UPSTREAM_DEFAULTS },
-        stats: {
-          since: Date.now(),
-          createSession: 0,
-          refreshSession: 0,
-          ping: 0,
-          pingConfig: 0,
-          lyricsUpstream: 0,
-          lyricsCoalesced: 0,
-          clientOps: 0,
-          blocked: 0,
-        },
-        lastBlockAt: 0,
-        // When the next keep-alive is due, in epoch ms. Persisted with the rest
-        // of the state so a restart resumes the schedule instead of resetting
-        // it — a proxy that is restarted often must not ping more often.
-        alarmAt: null,
-      };
-      // State written before the keep-alive moved in here has no `alarmAt`;
-      // `null` means "nothing scheduled", which is the right reading of absent.
-      this.s.alarmAt ??= null;
-      this.rearm();
-    })();
-  }
-
-  save() {
-    return this.store.save(this.s);
-  }
-
-  /** Line the timer up with `s.alarmAt`. Cheap, so it is called on every change. */
-  rearm() {
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = null;
-    if (this.s.alarmAt == null) return;
-    this.timer = setTimeout(
-      () => {
-        this.s.alarmAt = null;
-        this.alarm().catch((err) => this.log("warn", "alarm_failed", { error: describeError(err) }));
-      },
-      Math.max(0, this.s.alarmAt - Date.now())
-    );
-    // The keep-alive must never be the reason the process refuses to exit.
-    this.timer.unref?.();
-  }
-
-  /** Stop the keep-alive timer (shutdown, tests). */
-  stop() {
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = null;
-  }
-
-  // Fire-and-forget work that must not block the client's response. The
-  // process outlives any single request, so a bare promise is all this needs —
-  // only the rejection has to be swallowed.
-  bg(promise) {
-    return Promise.resolve(promise).catch((err) =>
-      this.log("warn", "background_failed", { error: describeError(err) })
-    );
-  }
-
-  // Loud, and at warn level: an operator staring at "lyrics don't load" needs
-  // this to be the first thing they see in the logs.
-  noteBlock(op, http, kind) {
-    this.s.stats.blocked++;
-    this.s.lastBlockAt = Date.now();
-    this.s.lastBlockKind = kind;
-    this.log("warn", "upstream_blocked", {
-      op,
-      http,
-      kind,
-      detail:
-        "api.spicylyrics.org answered with an HTML page instead of the API — " +
-        "the request never reached it. This is an upstream network/WAF " +
-        "decision, not a token or session problem. A 'cloudflare-challenge' " +
-        "means this machine's address is being challenged: route the proxy's " +
-        "own traffic elsewhere with PROXY_URL.",
-    });
-  }
-
-  keepAliveMs() {
-    return Math.max(this.s.config.pingIntervalMs, this.s.config.minPingIntervalMs);
-  }
-
-  armAlarm() {
-    const want = Date.now() + this.keepAliveMs();
-    // Only (re)arm if there is no alarm or the pending one is far too late.
-    if (this.s.alarmAt == null || this.s.alarmAt > want + 60_000) {
-      this.s.alarmAt = want;
-      this.rearm();
-    }
-  }
-
-  // One upstream `/query` call, with the shared identity.
-  async upstream(queries, withAuthorization, tag) {
-    const token = await getWebPlayerToken(this.env);
-    const started = Date.now();
-    try {
-      const res = await fetch(`${cfg(this.env).apiOrigin}/query`, {
-        method: "POST",
-        headers: upstreamHeaders(this.env, token, withAuthorization),
-        body: JSON.stringify({
-          queries,
-          client: { version: cfg(this.env).clientVersion },
-        }),
-      });
-      const raw = await res.arrayBuffer();
-      const blocked = isUpstreamBlock(res.headers.get("Content-Type"));
-      if (blocked) this.noteBlock(tag, res.status, blockKind(raw));
-      let result = null;
-      if (res.ok && !blocked) {
-        try {
-          const json = JSON.parse(new TextDecoder().decode(raw));
-          result =
-            json?.queries?.find((q) => q.operationId === "0")?.result ??
-            json?.queries?.[0]?.result ??
-            null;
-        } catch {
-          result = null;
-        }
-      }
-      if (!blocked) {
-        this.log("info", "upstream", {
-          op: tag,
-          http: res.status,
-          inner: result?.httpStatus ?? null,
-          ms: Date.now() - started,
-        });
-      }
-      this.s.lastUpstreamAt = Date.now();
-      return result;
-    } catch (err) {
-      this.log("warn", "upstream_failed", { op: tag, error: describeError(err) });
-      return null;
-    }
-  }
-
-  async syncPingConfig() {
-    const r = await this.upstream([{ operation: "pingConfig", variables: {} }], false, "pingConfig");
-    this.s.stats.pingConfig++;
-    const d = r?.httpStatus === OK ? r.data : null;
-    if (!d || typeof d !== "object") return;
-    const pos = (v) => typeof v === "number" && Number.isFinite(v) && v > 0;
-    if (pos(d.pingIntervalMs)) this.s.config.pingIntervalMs = d.pingIntervalMs;
-    if (pos(d.minPingIntervalMs)) this.s.config.minPingIntervalMs = d.minPingIntervalMs;
-    if (pos(d.sessionTtlSeconds)) this.s.config.sessionTtlSeconds = d.sessionTtlSeconds;
-    if (pos(d.refreshAtTtlFraction) && d.refreshAtTtlFraction <= 1) {
-      this.s.config.refreshAtTtlFraction = d.refreshAtTtlFraction;
-    }
-  }
-
-  // Open the one shared session. Failures back off hard (up to 15 min) so a
-  // dead SP_DC cookie can never turn into a retry storm against the API —
-  // clients are answered locally either way and never see the difference.
-  ensureSession() {
-    if (this.s.tk) return Promise.resolve(this.s.tk);
-    if (this.creating) return this.creating;
-    if (Date.now() < this.s.nextCreateAt) return Promise.resolve(null);
-
-    this.creating = (async () => {
-      await this.syncPingConfig();
-      const r = await this.upstream(
-        [{ operation: "createSession", variables: {} }],
-        true,
-        "createSession"
-      );
-      this.s.stats.createSession++;
-      if (r?.httpStatus === OK && r.data?.tk) {
-        this.s.tk = r.data.tk;
-        this.s.createdAt = Date.now();
-        this.s.createBackoff = CREATE_BACKOFF_BASE_MS;
-        this.s.nextCreateAt = 0;
-        this.log("info", "session_opened", {});
-        this.armAlarm();
-      } else {
-        this.s.nextCreateAt = Date.now() + this.s.createBackoff;
-        this.s.createBackoff = Math.min(this.s.createBackoff * 2, CREATE_BACKOFF_MAX_MS);
-        this.log("warn", "session_open_failed", { retryInMs: this.s.createBackoff });
-      }
-      await this.save();
-      return this.s.tk;
-    })().finally(() => {
-      this.creating = null;
-    });
-    return this.creating;
-  }
-
-  async dropSession(why) {
-    this.log("info", "session_dropped", { why });
-    this.s.tk = null;
-    this.s.createdAt = 0;
-    this.s.alarmAt = null;
-    this.rearm();
-    await this.save();
-  }
-
-  // Keep-alive. Runs on this hub's own timer, so the upstream ping cadence is
-  // fixed by the API's config and completely independent of how many devices
-  // are connected (or whether any of them is awake).
-  async alarm() {
-    await this.ready;
-    if (!this.s.tk) return;
-
-    const idleFor = Date.now() - this.s.lastClientAt;
-    if (idleFor > cfg(this.env).sessionIdleMs) {
-      // Nobody is listening. Let the session lapse rather than ping forever.
-      await this.dropSession("idle");
-      return;
-    }
-
-    const ttlMs = this.s.config.sessionTtlSeconds * 1000;
-    const due = this.s.createdAt + ttlMs * this.s.config.refreshAtTtlFraction;
-    if (Date.now() >= due) {
-      await this.syncPingConfig();
-      const r = await this.upstream(
-        [{ operation: "refreshSession", variables: { tk: this.s.tk } }],
-        true,
-        "refreshSession"
-      );
-      this.s.stats.refreshSession++;
-      if (r?.httpStatus === OK && r.data?.tk) {
-        this.s.tk = r.data.tk;
-        this.s.createdAt = Date.now();
-      } else if (r?.httpStatus === SESSION_DEAD || !r) {
-        this.s.tk = null;
-        await this.save();
-        await this.ensureSession();
-        this.armAlarm();
-        return;
-      }
-    } else {
-      const r = await this.upstream(
-        [{ operation: "ping", variables: { tk: this.s.tk } }],
-        false,
-        "ping"
-      );
-      this.s.stats.ping++;
-      if (r?.httpStatus === SESSION_DEAD) {
-        this.s.tk = null;
-        await this.save();
-        await this.ensureSession();
-        this.armAlarm();
-        return;
-      }
-    }
-
-    this.s.alarmAt = Date.now() + this.keepAliveMs();
-    this.rearm();
-    await this.save();
-  }
-
-  // A client's session op. Nothing is forwarded: we only note that somebody is
-  // listening, make sure the shared session exists, and keep the alarm armed.
-  async touch() {
-    this.s.lastClientAt = Date.now();
-    this.s.stats.clientOps++;
-    this.bg(
-      (async () => {
-        await this.ensureSession();
-        this.armAlarm();
-        await this.save();
-      })()
-    );
-  }
-
-  // Upstream lyric fetch, coalesced per track id. `coalesced` says whether THIS
-  // caller rode along on a fetch that was already in flight — it is per-caller,
-  // so it cannot be read off the shared result or off a counter.
-  async lyrics(id, bodyText) {
-    this.s.lastClientAt = Date.now();
-    let p = this.inflight.get(id);
-    const coalesced = !!p;
-    if (coalesced) {
-      this.s.stats.lyricsCoalesced++;
-      this.log("debug", "lyrics_coalesced", { id });
-    } else {
-      this.s.stats.lyricsUpstream++;
-      p = this.fetchLyrics(id, bodyText).finally(() => this.inflight.delete(id));
-      this.inflight.set(id, p);
-      this.bg(this.ensureSession());
-    }
-    this.bg(this.save());
-    return { ...(await p), coalesced };
-  }
-
-  async fetchLyrics(id, bodyText) {
-    const token = await getWebPlayerToken(this.env);
-    const started = Date.now();
-    try {
-      const res = await fetch(`${cfg(this.env).apiOrigin}/query`, {
-        method: "POST",
-        headers: upstreamHeaders(this.env, token, false),
-        body: withOwnVersion(bodyText, cfg(this.env).clientVersion),
-      });
-      const buf = await res.arrayBuffer();
-      const contentType = res.headers.get("Content-Type") || "application/json";
-      this.s.lastUpstreamAt = Date.now();
-
-      if (isUpstreamBlock(contentType)) {
-        this.noteBlock("lyrics", res.status, blockKind(buf));
-        // Never hand a Cloudflare HTML page to the page's JSON parser, and never
-        // cache it (only inner-200/404 are cached). Return something the client
-        // can name.
-        return blockedLyricsResult();
-      }
-
-      this.log("info", "upstream", {
-        op: "lyrics",
-        id,
-        http: res.status,
-        inner: innerStatus(buf),
-        bytes: buf.byteLength,
-        ms: Date.now() - started,
-      });
-      return { status: res.status, contentType, buf };
-    } catch (err) {
-      this.log("warn", "upstream_failed", { op: "lyrics", id, error: describeError(err) });
-      // Name it in the body too. `queries: []` alone reads as "no lyrics" to
-      // anyone holding a terminal, when it actually means the request never
-      // left the machine — check the logs for `evt="upstream_failed"`.
-      return {
-        status: 502,
-        contentType: "application/json",
-        unreachable: true,
-        buf: new TextEncoder()
-          .encode(JSON.stringify({ error: "upstream-unreachable", queries: [] }))
-          .buffer,
-      };
-    }
-  }
-
-  /**
-   * What the client asked of us versus what we forwarded. `stats.clientOps`
-   * counts device-side session ops; `stats.ping` + `stats.lyricsUpstream` count
-   * what actually left this machine. The gap is the whole point of the proxy.
-   */
-  stats() {
-    return {
-      sessionOpen: !!this.s.tk,
-      sessionAgeSeconds: this.s.createdAt ? Math.round((Date.now() - this.s.createdAt) / 1000) : 0,
-      upstreamKeepAliveEverySeconds: Math.round(this.keepAliveMs() / 1000),
-      lastUpstreamAt: this.s.lastUpstreamAt || null,
-      lastClientAt: this.s.lastClientAt || null,
-      upstreamBlocked: this.s.stats.blocked
-        ? {
-            count: this.s.stats.blocked,
-            lastAt: this.s.lastBlockAt,
-            kind: this.s.lastBlockKind || null,
-            detail:
-              "api.spicylyrics.org is returning a Cloudflare block page to " +
-              "this proxy. The requests are not reaching the API.",
-          }
-        : null,
-      upstreamConfig: this.s.config,
-      stats: this.s.stats,
-    };
-  }
-}
+const RATE_HEADERS = ["RateLimit-Limit", "RateLimit-Remaining", "RateLimit-Reset", "Retry-After"];
 
 // --- the proxy --------------------------------------------------------------
 
 /**
  * Build the request handler.
  *
- * `cache` stores lyric bodies by track id:
- *   match(id) -> { buf, contentType } | undefined
- *   put(id, { buf, contentType, ttl })   (ttl in seconds)
- * `store` persists the hub's state blob:
- *   load() -> state | undefined
- *   save(state)
- *
- * Both are supplied by the host, so this module stays free of any disk or
- * network concern that is not the API itself.
+ * `cache` stores API answers by track id, supplied by the host:
+ *   match(id) -> { buf, contentType, status } | undefined
+ *   put(id, { buf, contentType, status, ttl })   (ttl in seconds)
  */
-export function createProxy({ env = {}, cache, store }) {
+export function createProxy({ env = {}, cache }) {
   const log = makeLog(env, "proxy");
-  const hub = new SessionHub(env, store);
+  const inflight = new Map(); // id -> Promise<upstream result>
+  const stats = {
+    requests: 0,
+    cacheHits: 0,
+    coalesced: 0,
+    upstream: 0,
+    rateLimited: 0,
+    blocked: 0,
+    errors: 0,
+  };
+  // Last `RateLimit-*` the API reported, and until when we hold off after an
+  // application-level 429.
+  const rate = { limit: null, remaining: null, resetAt: null, cooldownUntil: 0 };
+  let lastBlock = null;
 
-  async function handle(request) {
-    const c = cfg(env);
-
-    if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: corsHeaders(request) });
+  function noteRate(headers) {
+    const limit = Number(headers.get("RateLimit-Limit"));
+    const remaining = Number(headers.get("RateLimit-Remaining"));
+    const reset = Number(headers.get("RateLimit-Reset"));
+    if (headers.has("RateLimit-Limit") && Number.isFinite(limit)) rate.limit = limit;
+    if (headers.has("RateLimit-Remaining") && Number.isFinite(remaining)) rate.remaining = remaining;
+    if (headers.has("RateLimit-Reset") && Number.isFinite(reset)) {
+      rate.resetAt = Date.now() + reset * 1000;
     }
-
-    const inUrl = new URL(request.url);
-    const cors = corsHeaders(request);
-
-    // Diagnostic: confirms token minting works without ever exposing the token.
-    if (inUrl.pathname === "/__spicy/tokencheck") {
-      if (!env.SP_DC) return json({ ok: false, reason: "SP_DC not set" }, cors);
-      cachedToken = null;
-      const minted = await mintToken(env);
-      return json(
-        minted
-          ? { ok: true, totpVer: minted.version }
-          : { ok: false, reason: "minting failed (cookie expired or secret rotated)" },
-        cors
-      );
-    }
-
-    // Diagnostic: how much traffic actually reaches the Spicy Lyrics API.
-    if (inUrl.pathname === "/__spicy/stats") {
-      await hub.ready;
-      return json(hub.stats(), cors);
-    }
-
-    const body =
-      request.method === "GET" || request.method === "HEAD"
-        ? undefined
-        : await request.arrayBuffer();
-
-    const kind = body ? classify(body) : { type: "other" };
-
-    // --- Session lifecycle: answered here, never forwarded per client. -------
-    if (kind.type === "session") {
-      await hub.ready;
-      // Fire-and-forget: the client's answer never waits on (or fails with) the
-      // shared session's health.
-      hub.bg(hub.touch());
-      log("debug", "session_op_local", {
-        ops: kind.queries.map((q) => q?.operation).join(","),
-      });
-      return json(sessionEnvelope(kind.queries, c), { ...cors, "X-Spicy-Session": "shared" });
-    }
-
-    // --- Lyrics: cache → shared hub (which coalesces). -----------------------
-    if (kind.type === "lyrics") {
-      const hit = await cache.match(kind.id);
-      if (hit) {
-        log("debug", "cache", { id: kind.id, state: "hit" });
-        return new Response(hit.buf, {
-          status: 200,
-          headers: {
-            "Content-Type": hit.contentType || "application/json",
-            "X-Spicy-Cache": "hit",
-            ...cors,
-          },
-        });
-      }
-
-      await hub.ready;
-      let r;
-      try {
-        r = await hub.lyrics(kind.id, new TextDecoder().decode(body));
-      } catch (err) {
-        log("error", "hub_failed", { id: kind.id, error: describeError(err) });
-        return json({ queries: [] }, { ...cors, "X-Spicy-Cache": "error" });
-      }
-
-      // Cache a found result for a long time; a definite "not found" briefly (so
-      // a song without lyrics isn't re-queried every play). Never cache 503
-      // (queued), transient errors or an upstream block.
-      const inner = innerStatus(r.buf);
-      let ttl = 0;
-      if (r.status === 200 && inner === 200) ttl = c.lyricsCacheTtl;
-      else if (r.status === 200 && inner === 404) ttl = c.lyricsMissCacheTtl;
-      if (ttl > 0) {
-        hub.bg(cache.put(kind.id, { buf: r.buf, contentType: r.contentType, ttl }));
-      }
-
-      log("info", "cache", {
-        id: kind.id,
-        state: r.coalesced ? "coalesced" : "miss",
-        inner,
-        ttl,
-      });
-
-      const outHeaders = {
-        "Content-Type": r.contentType,
-        "X-Spicy-Cache": r.coalesced ? "coalesced" : "miss",
-        ...cors,
-      };
-      // Lets the page say "the API blocked this proxy" instead of "an error
-      // occurred" — the two need very different reactions from the operator.
-      if (r.blocked) outHeaders["X-Spicy-Upstream"] = "blocked";
-      // Same idea for a call that never got a reply at all.
-      if (r.unreachable) outHeaders["X-Spicy-Upstream"] = "unreachable";
-      return new Response(r.buf, { status: r.status, headers: outHeaders });
-    }
-
-    // --- Everything else: plain passthrough with the shared identity. --------
-    const token = await getWebPlayerToken(env);
-    const headers = upstreamHeaders(env, token, false);
-    if (!token) {
-      const clientAuth = request.headers.get("SpicyLyrics-WebAuth");
-      if (clientAuth) headers.set("SpicyLyrics-WebAuth", clientAuth);
-    }
-    headers.set("X-mode", request.headers.get("X-mode") || "2");
-
-    const upstream = await fetch(c.apiOrigin + inUrl.pathname + inUrl.search, {
-      method: request.method,
-      headers,
-      body,
-    });
-    log("info", "passthrough", { path: inUrl.pathname, http: upstream.status });
-
-    const respHeaders = new Headers(upstream.headers);
-    for (const [k, v] of Object.entries(cors)) respHeaders.set(k, v);
-    return new Response(upstream.body, {
-      status: upstream.status,
-      statusText: upstream.statusText,
-      headers: respHeaders,
-    });
   }
 
-  return { fetch: handle, hub };
-}
+  async function fetchUpstream(id) {
+    const c = cfg(env);
+    const started = Date.now();
+    stats.upstream++;
+    try {
+      const res = await fetch(`${c.apiOrigin}/v1/lyrics/${id}`, {
+        headers: { Accept: "application/json", Authorization: `Bearer ${c.apiKey}` },
+      });
+      const buf = await res.arrayBuffer();
+      const contentType = res.headers.get("Content-Type") || "application/json";
+      noteRate(res.headers);
 
-function json(obj, extraHeaders) {
-  return new Response(JSON.stringify(obj), {
-    headers: { "Content-Type": "application/json", ...extraHeaders },
-  });
+      if (isUpstreamBlock(contentType)) {
+        stats.blocked++;
+        lastBlock = { at: Date.now(), http: res.status };
+        log("warn", "upstream_blocked", { id, http: res.status });
+        return {
+          status: 502,
+          contentType: "application/json",
+          buf: new TextEncoder().encode(
+            errorEnvelope(502, "upstream_blocked", "The API answered with an HTML page instead of JSON: the proxy's network path is being blocked.")
+          ).buffer,
+          blocked: true,
+          headers: {},
+        };
+      }
+
+      const code = res.ok ? null : errorCode(buf);
+      // Only the application's own window is a reason to stop forwarding.
+      // `upstream_rate_limited` is the API's provider throttling one lookup,
+      // and says nothing about our key.
+      if (res.status === 429 && code === "rate_limited") {
+        stats.rateLimited++;
+        const wait = Number(res.headers.get("Retry-After") ?? res.headers.get("RateLimit-Reset"));
+        rate.cooldownUntil = Date.now() + (Number.isFinite(wait) && wait > 0 ? wait : 60) * 1000;
+        log("warn", "rate_limited", { id, retryAfter: wait });
+      }
+      if (!res.ok && res.status !== 404) stats.errors++;
+
+      log("info", "upstream", {
+        id,
+        http: res.status,
+        error: code ?? undefined,
+        bytes: buf.byteLength,
+        remaining: rate.remaining,
+        ms: Date.now() - started,
+      });
+
+      const headers = {};
+      for (const name of RATE_HEADERS) {
+        const v = res.headers.get(name);
+        if (v !== null) headers[name] = v;
+      }
+      return { status: res.status, contentType, buf, headers };
+    } catch (err) {
+      stats.errors++;
+      log("warn", "upstream_failed", { id, error: describeError(err) });
+      return {
+        status: 502,
+        contentType: "application/json",
+        buf: new TextEncoder().encode(
+          errorEnvelope(502, "upstream_unreachable", "The proxy could not reach the lyrics API. Check its logs for evt=\"upstream_failed\".")
+        ).buffer,
+        unreachable: true,
+        headers: {},
+      };
+    }
+  }
+
+  async function lyrics(id, cors) {
+    const c = cfg(env);
+    stats.requests++;
+
+    if (!TRACK_ID.test(id)) {
+      return errorResponse(400, "invalid_track_id", "A track id is 22 base62 characters, as it appears in a Spotify track URL.", cors);
+    }
+
+    const hit = await cache.match(id);
+    if (hit) {
+      stats.cacheHits++;
+      log("debug", "cache", { id, state: "hit" });
+      return new Response(hit.buf, {
+        status: hit.status || 200,
+        headers: { "Content-Type": hit.contentType || "application/json", "X-Spicy-Cache": "hit", ...cors },
+      });
+    }
+
+    if (!c.apiKey) {
+      return errorResponse(500, "proxy_not_configured", "SPICY_API_KEY is not set on the proxy.", cors);
+    }
+
+    const waitMs = rate.cooldownUntil - Date.now();
+    if (waitMs > 0) {
+      const retryAfter = String(Math.ceil(waitMs / 1000));
+      log("debug", "cache", { id, state: "cooldown" });
+      return errorResponse(429, "rate_limited", `The proxy's request window is exhausted. Retry in ${retryAfter}s.`, {
+        ...cors,
+        "Retry-After": retryAfter,
+        "X-Spicy-Cache": "cooldown",
+      });
+    }
+
+    let p = inflight.get(id);
+    const coalesced = !!p;
+    if (coalesced) {
+      stats.coalesced++;
+    } else {
+      p = fetchUpstream(id).finally(() => inflight.delete(id));
+      inflight.set(id, p);
+    }
+    const r = await p;
+
+    // Cache a found result for a long time; a definite "no lyrics" briefly (so a
+    // song without lyrics isn't re-queried every play). Never cache errors,
+    // rate limits or an upstream block.
+    let ttl = 0;
+    if (r.status === 200) ttl = c.lyricsCacheTtl;
+    else if (r.status === 404) ttl = c.lyricsMissCacheTtl;
+    if (ttl > 0 && !coalesced) {
+      await cache.put(id, { buf: r.buf, contentType: r.contentType, status: r.status, ttl }).catch(() => {});
+    }
+
+    log("info", "cache", { id, state: coalesced ? "coalesced" : "miss", http: r.status, ttl });
+
+    const out = {
+      "Content-Type": r.contentType,
+      "X-Spicy-Cache": coalesced ? "coalesced" : "miss",
+      ...r.headers,
+      ...cors,
+    };
+    // Lets the page say "the API blocked this proxy" or "the proxy can't reach
+    // the API" instead of a generic error — they need different reactions.
+    if (r.blocked) out["X-Spicy-Upstream"] = "blocked";
+    if (r.unreachable) out["X-Spicy-Upstream"] = "unreachable";
+    return new Response(r.buf, { status: r.status, headers: out });
+  }
+
+  /**
+   * What the devices asked for versus what reached the API. `requests` counts
+   * lookups; `upstream` counts calls that actually left this machine. The gap
+   * is the cache and the coalescing at work.
+   */
+  function snapshot() {
+    const c = cfg(env);
+    return {
+      keyConfigured: !!c.apiKey,
+      keyKind: keyKind(c.apiKey),
+      rateLimit: {
+        limit: rate.limit,
+        remaining: rate.remaining,
+        resetsInSeconds: rate.resetAt ? Math.max(0, Math.round((rate.resetAt - Date.now()) / 1000)) : null,
+        coolingDownForSeconds: Math.max(0, Math.ceil((rate.cooldownUntil - Date.now()) / 1000)),
+      },
+      upstreamBlocked: lastBlock
+        ? {
+            count: stats.blocked,
+            lastAt: lastBlock.at,
+            detail: "api.spicylyrics.org answered with an HTML page instead of JSON. The requests are not reaching the API.",
+          }
+        : null,
+      stats: { ...stats },
+    };
+  }
+
+  async function handle(request) {
+    const cors = corsHeaders(request);
+
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: cors });
+    }
+
+    const url = new URL(request.url);
+
+    // Diagnostic: how much traffic actually reaches the Spicy Lyrics API.
+    if (url.pathname === "/__spicy/stats") return json(snapshot(), cors);
+
+    const m = LYRICS_PATH.exec(url.pathname);
+    if (m) {
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        return errorResponse(405, "invalid_request", "Only GET is supported.", { ...cors, Allow: "GET, OPTIONS" });
+      }
+      return lyrics(decodeURIComponent(m[1]), cors);
+    }
+
+    return errorResponse(404, "not_found", "This proxy only serves GET /v1/lyrics/{trackId}.", cors);
+  }
+
+  return { fetch: handle, stats: snapshot };
 }

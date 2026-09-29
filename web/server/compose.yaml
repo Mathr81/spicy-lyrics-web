@@ -1,20 +1,20 @@
 # Run the proxy on a VPS or home server:
 #
 #   cd web/server
-#   cp .env.example .env     # put your sp_dc cookie in it
+#   cp .env.example .env     # put your SPICY_API_KEY in it
 #   docker compose up -d
 #
 # Then point the web app at it: build with
 # VITE_LYRICS_API=https://lyrics.example.com (see web/README.md).
 #
 # One container, no dependencies, no database. The image is node:22-alpine plus
-# three source files; at rest the proxy holds a session token and a few counters.
+# three source files; at rest the proxy holds a lyric cache and a few counters.
 #
 # NO PORT IS PUBLISHED ON THE HOST. The container joins the reverse proxy's own
 # Docker network (Nginx Proxy Manager's `npm_default` by default) and is reached
 # there by container name. Nothing about it is listening on the machine's
-# interfaces, which is what you want for a service that talks to the Spotify API
-# as your own account.
+# interfaces, which is what you want for a service that spends your API key's
+# request window.
 #
 # In Nginx Proxy Manager → Proxy Hosts → Add:
 #   Forward Hostname / IP:  spicy-lyrics-proxy
@@ -49,7 +49,7 @@ services:
 
     env_file: .env
 
-    # The session and the lyric cache. Losing it costs one re-fetch per song,
+    # The lyric cache. Losing it costs one re-fetch per song,
     # nothing more, but keeping it means a restart is free.
     volumes:
       - state:/state
