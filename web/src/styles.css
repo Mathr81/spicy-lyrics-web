@@ -89,9 +89,7 @@ html.sl-ios-standalone .sl-settings-overlay {
 
 /* The status line is anchored to the viewport bottom, which is now the bar's
    old position — push it down with everything else. */
-html.sl-ios-standalone .sl-status,
-html.sl-ios-standalone .sl-sync,
-html.sl-ios-standalone .sl-sync-toast {
+html.sl-ios-standalone .sl-status {
   bottom: calc(
     max(16px, env(safe-area-inset-bottom, 0px)) -
       var(--sl-viewport-gap, env(safe-area-inset-top, 0px))
@@ -760,10 +758,13 @@ html.sl-ios-standalone .sl-sync-toast {
 /* Sync bar (sync.ts) — floats over the bottom of the page so the lyrics  */
 /* stay visible while the offset is adjusted.                             */
 /* --------------------------------------------------------------------- */
+/* Always a clear gap above the bottom edge, on top of the safe area (the iPad
+   home indicator, Android's gesture bar): a card resting on the edge of the
+   screen looks broken. */
 .sl-sync {
   position: fixed;
   left: 50%;
-  bottom: max(16px, env(safe-area-inset-bottom, 0px));
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 20px);
   transform: translateX(-50%);
   z-index: 1050;
   width: min(460px, calc(100% - 24px));
@@ -944,7 +945,7 @@ html.sl-ios-standalone .sl-sync-toast {
 .sl-sync-toast {
   position: fixed;
   left: 50%;
-  bottom: max(24px, env(safe-area-inset-bottom, 0px));
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 24px);
   transform: translate(-50%, 8px);
   z-index: 1050;
   padding: 8px 16px;
