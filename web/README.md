@@ -203,14 +203,35 @@ contributor's profile — alongside "Provided by: …" for every source.
 
 ### If the API blocks the proxy
 
-`api.spicylyrics.org` sits behind Cloudflare. If its WAF ever refuses the
-proxy's network path, the answer is an HTML page ("Sorry, you have been blocked"
-or a "Just a moment…" challenge) instead of JSON. The proxy detects that on the
-content type, never caches it, answers `502` with `X-Spicy-Upstream: blocked`,
-reports it under `upstreamBlocked` in `/__spicy/stats` and logs
-`evt="upstream_blocked"`; the page says "L'API Spicy Lyrics refuse les requêtes
-du proxy" instead of a generic failure. `PROXY_URL` (below) routes the proxy's
-outbound traffic through a different network path.
+`api.spicylyrics.org` sits behind Cloudflare. If its WAF refuses the proxy's
+network path, the answer is an HTML page instead of JSON. The proxy detects that
+on the content type, never caches it, answers `502` with
+`X-Spicy-Upstream: blocked`, logs `evt="upstream_blocked"`, and the page says
+"L'API Spicy Lyrics refuse les requêtes du proxy" instead of a generic failure.
+
+`/__spicy/stats` → `upstreamBlocked` says which wall it was:
+
+| `kind` | Page | What it means |
+|---|---|---|
+| `cloudflare-challenge` | "Just a moment…" | the machine's address is being challenged — typical of a datacenter/VPS IP; a server cannot solve it |
+| `cloudflare-block` | "Sorry, you have been blocked" | a deny rule matches the address |
+
+It also carries the page `title`, the `http` status and the `cfRay` id (quote
+that one if you ask the Spicy Lyrics maintainers about it).
+
+The key is not the problem in either case: a bad key gets a JSON `401`/`403`.
+To confirm it is the address, run the same request from another machine — a
+`200` there while the proxy gets HTML settles it:
+
+```bash
+curl -s -o /dev/null -w '%{http_code} %{content_type}\n' \
+  -H "Authorization: Bearer $SPICY_API_KEY" \
+  https://api.spicylyrics.org/v1/lyrics/4cOdK2wGLETKBW3PvgPWqT
+```
+
+The fix is to leave from somewhere else: `PROXY_URL` (below) routes the
+proxy's outbound traffic through a SOCKS5/HTTP proxy on a different network
+path — a home connection, for instance. Nothing else needs to change.
 
 ## Running the proxy (`web/server/`)
 

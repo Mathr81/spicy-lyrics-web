@@ -95,6 +95,36 @@ function corsHeaders(request) {
   };
 }
 
+// Which kind of wall it was, for diagnostics only — never a condition: any HTML
+// page is a page instead of an API response. A challenge ("Just a moment…")
+// means Cloudflare is vetting this machine's address, typical of a datacenter
+// IP; a block ("you have been blocked") means a deny rule matched.
+function blockKind(buf) {
+  try {
+    const head = new TextDecoder().decode(buf.slice(0, 8192));
+    if (/Just a moment|cf[-_]chl|challenge-platform|Enable JavaScript and cookies/i.test(head)) {
+      return "cloudflare-challenge";
+    }
+    if (/Attention Required|you have been blocked|cf-error-details/i.test(head)) {
+      return "cloudflare-block";
+    }
+    if (/Cloudflare/i.test(head)) return "cloudflare-other";
+    return "html-page";
+  } catch {
+    return "unknown";
+  }
+}
+
+// The page's <title>, trimmed — says in a few words what answered.
+function pageTitle(buf) {
+  try {
+    const m = /<title[^>]*>([^<]{0,200})<\/title>/i.exec(new TextDecoder().decode(buf.slice(0, 8192)));
+    return m ? m[1].replace(/\s+/g, " ").trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 // --- responses ----------------------------------------------------------------
 
 // The API's own error shape, so the page parses the proxy's errors exactly like
@@ -203,8 +233,15 @@ export function createProxy({ env = {}, cache }) {
 
       if (isUpstreamBlock(contentType)) {
         stats.blocked++;
-        lastBlock = { at: Date.now(), http: res.status };
-        log("warn", "upstream_blocked", { id, http: res.status });
+        lastBlock = {
+          at: Date.now(),
+          http: res.status,
+          kind: blockKind(buf),
+          title: pageTitle(buf),
+          cfRay: res.headers.get("cf-ray"),
+          cfMitigated: res.headers.get("cf-mitigated"),
+        };
+        log("warn", "upstream_blocked", { id, ...lastBlock });
         return {
           status: 502,
           contentType: "application/json",
@@ -346,6 +383,11 @@ export function createProxy({ env = {}, cache }) {
         ? {
             count: stats.blocked,
             lastAt: lastBlock.at,
+            http: lastBlock.http,
+            kind: lastBlock.kind,
+            title: lastBlock.title,
+            cfRay: lastBlock.cfRay,
+            cfMitigated: lastBlock.cfMitigated,
             detail: "api.spicylyrics.org answered with an HTML page instead of JSON. The requests are not reaching the API.",
           }
         : null,

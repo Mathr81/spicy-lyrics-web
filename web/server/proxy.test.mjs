@@ -158,6 +158,7 @@ const check = (name, cond, extra = "") => {
   check("HTML answer → 502 X-Spicy-Upstream: blocked", r.status === 502 && r.headers.get("X-Spicy-Upstream") === "blocked");
   check("…with a JSON error body", (await r.json()).Body.error === "upstream_blocked");
   check("…and not cached", !store.has("4444444444444444444444"));
+  check("stats name the kind of wall", proxy.stats().upstreamBlocked?.kind === "cloudflare-challenge", proxy.stats().upstreamBlocked?.kind);
   upstream.html = false;
 }
 
