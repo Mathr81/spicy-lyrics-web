@@ -159,3 +159,18 @@ export async function getAudioAnalysis(trackId: string): Promise<AudioAnalysisRe
   }
   return { status: "ok", data: json };
 }
+
+/**
+ * GET /v1/tracks/{id} — the ISRC (the recording's industry-wide id) and the
+ * exact duration, which is how the rhythm fallbacks find this recording in
+ * MusicBrainz / AcousticBrainz. Still open to new apps, unlike audio-analysis.
+ */
+export async function getTrackIdentity(
+  trackId: string
+): Promise<{ isrc: string | null; durationMs: number } | null> {
+  const res = await req(`/tracks/${trackId}`);
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`Track lookup failed: ${res.status}`);
+  const json = await res.json();
+  return { isrc: json?.external_ids?.isrc ?? null, durationMs: json?.duration_ms ?? 0 };
+}

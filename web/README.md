@@ -409,6 +409,27 @@ Then set `VITE_LYRICS_API` to the host's URL and rebuild the page.
 > The Screen Wake Lock also needs a secure context, so HTTPS is required for the
 > iPad to stay awake.
 
+## Background rhythm (beats without Spotify's audio analysis)
+
+The animated background speeds up with the song's tempo and pulses on each
+beat, from Spotify's `/v1/audio-analysis` in the extension. Spotify withdrew
+that endpoint for apps registered after 2024-11-27 (403), so the web build
+looks for the same data elsewhere (`web/src/rhythm/analysis.ts`), first answer
+wins:
+
+| Source | Gives | How it is reached |
+|---|---|---|
+| Spotify `/v1/audio-analysis` | everything | only if your app still has access; the first 403 turns it off |
+| [AcousticBrainz](https://acousticbrainz.org) | per-beat timestamps and BPM → **beat pulse** | Spotify `/v1/tracks` → ISRC → MusicBrainz recordings → AcousticBrainz low-level |
+| [ReccoBeats](https://reccobeats.com) | track tempo and loudness → the song's own pace, **no pulse** | by Spotify id |
+
+AcousticBrainz is only trusted when the file it analysed has Spotify's length
+to within 2 s: another edit or master would put every pulse off the beat.
+Its dataset stopped growing in 2022, so recent releases fall through to
+ReccoBeats. Both are free, keyless and CORS-enabled, so the page calls them
+directly. Each track's result (a miss included, retried after a week) is kept
+in `localStorage`, so a song costs its lookups once per device.
+
 ## How it works (architecture)
 
 `vite.config.ts` reuses the engine from `../src` and redirects a small set of
@@ -421,7 +442,7 @@ Spicetify-coupled modules to shims in `web/src/shim/`:
 | `components/Pages/PageView.ts` | `PageView.ts` | live `PageContainer` reference |
 | `components/Utils/Fullscreen.ts` | `Fullscreen.ts` | native Fullscreen API |
 | `components/Utils/CompactMode.ts` | `CompactMode.ts` | layout stub |
-| `components/DynamicBG/dynamicBackground.ts` | `dynamicBackground.ts` | Kawarp cover warp (no GraphQL colors / artist header) |
+| `components/DynamicBG/dynamicBackground.ts` | `dynamicBackground.ts` | Kawarp cover warp (no GraphQL colors / artist header), rhythm from `web/src/rhythm/` |
 | `utils/Lyrics/ProcessLyrics.ts` | `ProcessLyrics.ts` | drop on-device romanization CDN loads; use API transliterations |
 | `utils/Lyrics/Applyer/Credits/ApplyIsByCommunity.tsx` | `ApplyIsByCommunity.ts` | community credit with plain links instead of Spicetify tooltips |
 

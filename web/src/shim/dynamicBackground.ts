@@ -11,7 +11,7 @@ import {
   BackgroundAnimationController,
   type AudioAnalysisData,
 } from "@src/components/DynamicBG/BackgroundAnimationController.ts";
-import { getAudioAnalysis } from "../spotify/api.ts";
+import { getRhythm } from "../rhythm/analysis.ts";
 
 export const KawarpMap = new Map<HTMLElement | string, Kawarp>();
 
@@ -22,7 +22,7 @@ export const KawarpMap = new Map<HTMLElement | string, Kawarp>();
 // not a resting one. dynamicBackground.ts never leaves it there: it drives the
 // live value from `playback:playpause` (1 while playing, 0.1 while paused) and,
 // on every progress tick, from the beat/tempo/loudness multiplier
-// BackgroundAnimationController derives from Spotify's audio analysis.
+// BackgroundAnimationController derives from the track's audio analysis.
 //
 // This shim used to construct Kawarp and never touch the option again, so the
 // warp ran at a tenth of the extension's resting speed for the entire session —
@@ -45,20 +45,15 @@ function setAnimationSpeed(speed: number): void {
   });
 }
 
-// Spotify withdrew /v1/audio-analysis for apps registered after 2024-11-27, so
-// for most deployments the very first request answers 403. Record that once and
-// stop asking: the background then behaves exactly as the extension does on a
-// track with no analysis, rather than firing a doomed request per song.
-let analysisEndpointAvailable = true;
-// One entry per track, written once — including on failure, so a tick running
-// every SPEED_TICK_MS can never turn into a request loop. The cost of that is a
-// track losing its beat pulse for the session if its one request happened to hit
-// a network blip; the alternative is retrying ten times a second.
+// Rhythm data comes from a chain of sources (Spotify's audio analysis where the
+// app still has it, else AcousticBrainz beats, else ReccoBeats tempo) — see
+// rhythm/analysis.ts. One lookup per track, memoised here too, so a tick running
+// every SPEED_TICK_MS can never turn into a request loop.
 const analysisCache = new Map<string, AudioAnalysisData | null>();
 const analysisInflight = new Set<string>();
 
 /**
- * The analysis for `uri` if we already have it. Returns null while a request is
+ * The analysis for `uri` if we already have it. Returns null while a lookup is
  * in flight (and starts one if this track has never been asked for), so the
  * caller keeps animating at the default speed until the data lands.
  */
@@ -68,30 +63,12 @@ function analysisFor(uri: string): AudioAnalysisData | null {
 
   const cached = analysisCache.get(trackId);
   if (cached !== undefined) return cached;
-  if (!analysisEndpointAvailable || analysisInflight.has(trackId)) return null;
+  if (analysisInflight.has(trackId)) return null;
 
   analysisInflight.add(trackId);
-  void getAudioAnalysis(trackId)
-    .then((result) => {
-      if (result.status === "unavailable") {
-        // Withdrawn per app, not per track — nothing else will succeed either.
-        analysisEndpointAvailable = false;
-        analysisCache.set(trackId, null);
-        return;
-      }
-      analysisCache.set(
-        trackId,
-        result.status === "ok" ? (result.data as AudioAnalysisData) : null
-      );
-    })
-    .catch(() => {
-      // Transient (network, 429, expired token). Leave the endpoint enabled for
-      // other tracks, but don't ask about this one again.
-      analysisCache.set(trackId, null);
-    })
-    .finally(() => {
-      analysisInflight.delete(trackId);
-    });
+  void getRhythm(trackId)
+    .then((rhythm) => analysisCache.set(trackId, rhythm?.data ?? null))
+    .finally(() => analysisInflight.delete(trackId));
 
   return null;
 }
