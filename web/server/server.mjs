@@ -37,10 +37,17 @@ function log(...args) {
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const STATE_DIR = path.resolve(process.env.STATE_DIR || path.join(HERE, ".state"));
-const CACHE_DIR = path.join(STATE_DIR, "lyrics-cache");
+// Named after the API version it holds. The pre-v1 proxy kept `/query`
+// envelopes under `lyrics-cache/` with the same file names, so reading that
+// directory would serve them as v1 answers; it is removed at startup instead.
+const CACHE_DIR = path.join(STATE_DIR, "lyrics-cache-v1");
+const LEGACY_CACHE_DIR = path.join(STATE_DIR, "lyrics-cache");
+const LEGACY_STATE_FILE = path.join(STATE_DIR, "session.json");
 const PORT = Number(process.env.PORT || 8787);
 
 fs.mkdirSync(CACHE_DIR, { recursive: true });
+fs.rmSync(LEGACY_CACHE_DIR, { recursive: true, force: true });
+fs.rmSync(LEGACY_STATE_FILE, { force: true });
 
 // --- outbound proxy --------------------------------------------------------
 // Optional: route everything this process sends to the lyrics API through a SOCKS5 or HTTP CONNECT proxy. Installed

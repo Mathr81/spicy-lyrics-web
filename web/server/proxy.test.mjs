@@ -143,6 +143,21 @@ const check = (name, cond, extra = "") => {
   check("stats report the cooldown", s.rateLimit.coolingDownForSeconds > 0 && s.stats.rateLimited === 1);
 }
 
+// 6b. An entry left by the pre-v1 proxy is never served.
+{
+  const legacy = "6666666666666666666666";
+  store.set(legacy, {
+    buf: new TextEncoder().encode(JSON.stringify({ queries: [{ operationId: "0", result: { httpStatus: 200, data: [] } }] })),
+    contentType: "application/json",
+  });
+  proxy = createProxy({ env: { SPICY_API_KEY: KEY, LOG_LEVEL: "silent" }, cache });
+  upstream.calls.length = 0;
+  const r = await get(`/v1/lyrics/${legacy}`);
+  const body = await r.json();
+  check("legacy /query cache entry is discarded", r.headers.get("X-Spicy-Cache") === "miss" && upstream.calls.length === 1);
+  check("…and the v1 answer served instead", body.Body?.Type === "Syllable");
+}
+
 // 7. The key never leaves the proxy.
 {
   const s = await (await get("/__spicy/stats")).text();

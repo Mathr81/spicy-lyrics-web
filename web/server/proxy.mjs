@@ -154,6 +154,17 @@ function isUpstreamBlock(contentType) {
   return /text\/html/i.test(contentType || "");
 }
 
+// A v1 answer: `{ Body, Status, Type }`. Anything else in the cache (an entry
+// left by an older proxy, a truncated write) is dropped rather than served.
+function isV1Envelope(buf) {
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(buf));
+    return !!parsed && typeof parsed === "object" && "Body" in parsed && "Status" in parsed;
+  } catch {
+    return false;
+  }
+}
+
 // The API's machine-readable error code (`Body.error`), if the body has one.
 function errorCode(buf) {
   try {
@@ -303,7 +314,11 @@ export function createProxy({ env = {}, cache }) {
       return errorResponse(400, "invalid_track_id", "A track id is 22 base62 characters, as it appears in a Spotify track URL.", cors);
     }
 
-    const hit = await cache.match(id);
+    let hit = await cache.match(id);
+    if (hit && !isV1Envelope(hit.buf)) {
+      log("warn", "cache", { id, state: "discarded", reason: "not a v1 envelope" });
+      hit = undefined;
+    }
     if (hit) {
       stats.cacheHits++;
       log("debug", "cache", { id, state: "hit" });
@@ -344,7 +359,7 @@ export function createProxy({ env = {}, cache }) {
     let ttl = 0;
     if (r.status === 200) ttl = c.lyricsCacheTtl;
     else if (r.status === 404) ttl = c.lyricsMissCacheTtl;
-    if (ttl > 0 && !coalesced) {
+    if (ttl > 0 && !coalesced && isV1Envelope(r.buf)) {
       await cache.put(id, { buf: r.buf, contentType: r.contentType, status: r.status, ttl }).catch(() => {});
     }
 

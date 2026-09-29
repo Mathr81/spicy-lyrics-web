@@ -12,6 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
+import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { startSocks5 } from "./proxy-servers.test-helper.mjs";
 
@@ -88,8 +89,20 @@ async function waitReady() {
 const TRACK = "4cOdK2wGLETKBW3PvgPWqT";
 const q = (id) => fetch(`${BASE}/v1/lyrics/${id}`, { headers: { Origin: "https://page.test" } });
 
+// A cache left by the pre-v1 proxy: same directory scheme, `/query` bodies.
+const LEGACY_DIR = path.join(STATE, "lyrics-cache");
+fs.mkdirSync(LEGACY_DIR, { recursive: true });
+const legacyFile = path.join(LEGACY_DIR, crypto.createHash("sha256").update(TRACK).digest("hex") + ".json");
+fs.writeFileSync(legacyFile, JSON.stringify({
+  expires: Date.now() + 3600e3,
+  contentType: "application/json",
+  body: Buffer.from(JSON.stringify({ queries: [{ operationId: "0", result: { httpStatus: 200 } }] })).toString("base64"),
+}));
+
 let host = startHost();
 await waitReady();
+
+check("the pre-v1 cache is removed at startup", !fs.existsSync(LEGACY_DIR));
 
 // 1. Concurrent identical lyric lookups share one upstream call, with the key.
 const burst = await Promise.all([0, 1, 2, 3].map(() => q(TRACK)));
