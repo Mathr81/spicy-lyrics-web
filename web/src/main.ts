@@ -46,6 +46,7 @@ import { renderShell, type ShellHandle } from "./ui.ts";
 import { initViewport } from "./viewport.ts";
 import { initWakeLock, setPlaying as setWakeLockPlaying } from "./wakelock.ts";
 import { setupSettings, type SettingsHandle } from "./settings.ts";
+import { setupSync } from "./sync.ts";
 import { $romanization } from "@src/utils/uiState.ts";
 import LoadFonts, { ApplyFontPixel } from "@src/components/Styling/Fonts.ts";
 import Fullscreen from "./shim/Fullscreen.ts";
@@ -87,11 +88,10 @@ async function main(): Promise<void> {
 
   shell = renderShell(root, { onLogin: () => void login() });
 
+  const sync = setupSync(root);
   settings = setupSettings({
     getPage: () => page,
-    reapply: () => {
-      if (lastLyricsData) applyLyrics(lastLyricsData, $romanization.get());
-    },
+    openSync: () => sync.open(),
   });
 
   // All controls live on the cover, like the extension.
@@ -120,6 +120,7 @@ async function main(): Promise<void> {
     onSwapSides: () => swapNowBarSide(),
     onToggleCompact: () => toggleCompactMode(),
     onOpenSettings: () => settings.open(),
+    onOpenSync: () => sync.toggle(),
   });
 
   // Narrow viewports start in compact mode automatically — reflect that in the

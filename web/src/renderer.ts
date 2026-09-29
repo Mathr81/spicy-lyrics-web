@@ -26,6 +26,7 @@ import {
 } from "@src/utils/Lyrics/LyricsSkeleton.ts";
 import { ApplyExperimentClasses, onExperimentChange } from "@src/utils/experiments.ts";
 import type { SimpleTrack } from "./spotify/api.ts";
+import { enableLineSeek } from "./lineseek.ts";
 
 // iOS/iPadOS Safari throttles `scroll-behavior: smooth`, which makes the
 // active-line auto-scroll crawl and the lyrics drift. Detect it so the CSS can
@@ -87,6 +88,7 @@ export function buildPage(root: HTMLElement): HTMLElement {
 
   page = el;
   setPageContainer(el);
+  enableLineSeek(el.querySelector<HTMLElement>(".LyricsContent")!);
   $lyricsContainerExists.set(true);
 
   // Phone / narrow panes (portrait phones, iPad Split View): use the extension's

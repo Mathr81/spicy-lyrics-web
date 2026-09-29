@@ -18,8 +18,8 @@ import {
 
 export interface SettingsCallbacks {
   getPage: () => HTMLElement | null;
-  // Re-render the current lyrics (options that change the layout need a re-apply).
-  reapply: () => void;
+  // Open the floating sync bar (sync.ts).
+  openSync: () => void;
 }
 
 export interface SettingsHandle {
@@ -32,12 +32,6 @@ interface ToggleDef {
   get: () => boolean;
   set: (v: boolean) => void;
 }
-
-// The lyric clock corrects for network latency and for a typical audio output
-// delay, but it cannot know this listener's: Bluetooth headphones alone add
-// 150-300ms, and it varies per device. This is the dial for that last gap.
-const OFFSET_RANGE_MS = 1000;
-const OFFSET_STEP_MS = 25;
 
 /**
  * The extension ships Smooth Scrolling off; here it is the whole point of a
@@ -54,8 +48,19 @@ function defaultSmoothScrollingOn(): void {
   $smoothScrolling.set(true);
 }
 
+/**
+ * Simple and minimal lyrics modes used to be offered here and are not any more.
+ * Someone who had turned one on would be stuck with it and no switch to undo
+ * it, so both go back to off.
+ */
+function retireRemovedModes(): void {
+  if ($simpleLyricsMode.get()) $simpleLyricsMode.set(false);
+  if ($minimalLyricsMode.get()) $minimalLyricsMode.set(false);
+}
+
 export function setupSettings(cb: SettingsCallbacks): SettingsHandle {
   defaultSmoothScrollingOn();
+  retireRemovedModes();
 
   // The Spicy Lyrics font is on unless explicitly skipped; keep the page class in
   // sync now and whenever the store changes.
@@ -79,25 +84,6 @@ export function setupSettings(cb: SettingsCallbacks): SettingsHandle {
       get: () => $smoothScrolling.get(),
       set: (v) => $smoothScrolling.set(v),
     },
-    {
-      label: "Mode paroles simples",
-      desc: "Rendu épuré, sans animation lettre par lettre.",
-      get: () => $simpleLyricsMode.get(),
-      set: (v) => {
-        $simpleLyricsMode.set(v);
-        cb.reapply();
-      },
-    },
-    {
-      label: "Mode minimal",
-      desc: "Masque les éléments décoratifs autour des paroles.",
-      get: () => $minimalLyricsMode.get(),
-      set: (v) => {
-        $minimalLyricsMode.set(v);
-        cb.getPage()?.classList.toggle("MinimalLyricsMode", v);
-        cb.reapply();
-      },
-    },
   ];
 
   // Only offered where the Screen Wake Lock API exists (Safari 16.4+, current
@@ -110,10 +96,6 @@ export function setupSettings(cb: SettingsCallbacks): SettingsHandle {
       set: setWakeLockEnabled,
     });
   }
-
-  // Reflect persisted state on load.
-  cb.getPage()?.classList.toggle("SimpleLyricsMode", $simpleLyricsMode.get());
-  cb.getPage()?.classList.toggle("MinimalLyricsMode", $minimalLyricsMode.get());
 
   let overlay: HTMLElement | null = null;
 
@@ -144,49 +126,28 @@ export function setupSettings(cb: SettingsCallbacks): SettingsHandle {
   }
 
   /**
-   * The lyric sync offset, in milliseconds. Positive holds the lyrics back,
-   * negative runs them early — the same sign convention as the engine's
-   * $playbackOffset, which this writes straight into.
+   * The sync offset lives in its own floating bar so the lyrics stay visible
+   * while it is adjusted; this row shows the value and opens it.
    */
-  function buildOffsetRow(): HTMLElement {
+  function buildSyncRow(): HTMLElement {
     const row = document.createElement("div");
-    row.className = "sl-settings-row sl-settings-row-stacked";
+    row.className = "sl-settings-row";
     row.innerHTML = `
       <span class="sl-settings-text">
-        <span class="sl-settings-label"></span>
+        <span class="sl-settings-label">Synchro des paroles</span>
         <span class="sl-settings-desc"></span>
       </span>
-      <span class="sl-settings-slider">
-        <input type="range" aria-label="Décalage des paroles">
-        <button class="sl-settings-reset" type="button">Réinitialiser</button>
-      </span>`;
-    row.querySelector<HTMLElement>(".sl-settings-label")!.textContent =
-      "Décalage des paroles";
+      <button class="sl-settings-reset" type="button">Ajuster</button>`;
     const desc = row.querySelector<HTMLElement>(".sl-settings-desc")!;
-    const input = row.querySelector<HTMLInputElement>("input")!;
-    input.min = String(-OFFSET_RANGE_MS);
-    input.max = String(OFFSET_RANGE_MS);
-    input.step = String(OFFSET_STEP_MS);
-
-    const sync = () => {
-      const value = $playbackOffset.get();
-      input.value = String(value);
+    $playbackOffset.subscribe((v) => {
       desc.textContent =
-        value === 0
-          ? "Aligné sur la lecture. Glissez vers la droite si les paroles passent trop tôt."
-          : value > 0
-            ? `Paroles retardées de ${value} ms.`
-            : `Paroles avancées de ${-value} ms.`;
-    };
-    sync();
-
-    input.addEventListener("input", () => {
-      $playbackOffset.set(Number(input.value));
-      sync();
+        v === 0
+          ? "Aucun décalage. Raccourcis : [ et ] (Maj : ×10)."
+          : `Décalage actuel : ${v > 0 ? "+" : "−"}${Math.abs(v)} ms.`;
     });
-    row.querySelector<HTMLElement>(".sl-settings-reset")!.addEventListener("click", () => {
-      $playbackOffset.set(0);
-      sync();
+    row.querySelector<HTMLElement>("button")!.addEventListener("click", () => {
+      if (overlay) overlay.hidden = true;
+      cb.openSync();
     });
     return row;
   }
@@ -205,7 +166,7 @@ export function setupSettings(cb: SettingsCallbacks): SettingsHandle {
     title.textContent = "Réglages";
     card.appendChild(title);
     for (const def of toggles) card.appendChild(buildRow(def));
-    card.appendChild(buildOffsetRow());
+    card.appendChild(buildSyncRow());
     const close = document.createElement("button");
     close.className = "sl-settings-close";
     close.textContent = "Fermer";
