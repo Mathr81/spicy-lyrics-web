@@ -15,6 +15,9 @@ import "@src/css/Loaders/LoaderContainer.css";
 import "@src/css/Loaders/DotLoader.css";
 import "@src/css/Loaders/LyricsSkeleton.css";
 import "@src/css/font-pack/font-pack.css";
+// Loaded up front, not with the lazy Apple Music view, so a Picture-in-Picture
+// window (which copies the stylesheets present when it opens) always has it.
+import "@applemusic-like-lyrics/core/style.css";
 import "./styles.css";
 
 import { CLIENT_ID } from "./config.ts";

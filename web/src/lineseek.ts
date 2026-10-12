@@ -45,10 +45,14 @@ export function enableLineSeek(content: HTMLElement): void {
 
     const start = startOf(lineEl);
     if (start === null) return; // static lyrics, or an interlude dot line
-
-    const fade = $seekFadeCompensation.get() ? SEEK_FADE_COMPENSATION_MS : 0;
-    const position = Math.max(0, start + $playbackOffset.get() - fade);
-    SpotifyPlayer.Seek(position);
-    Global.Event.evoke("song:seek", position);
+    seekToLyricTime(start);
   });
+}
+
+/** Jump playback so the lyric timed at `start` (ms) is the active one. */
+export function seekToLyricTime(start: number): void {
+  const fade = $seekFadeCompensation.get() ? SEEK_FADE_COMPENSATION_MS : 0;
+  const position = Math.max(0, start + $playbackOffset.get() - fade);
+  SpotifyPlayer.Seek(position);
+  Global.Event.evoke("song:seek", position);
 }

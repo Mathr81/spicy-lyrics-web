@@ -15,6 +15,7 @@ import {
   setWakeLockEnabled,
   wakeLockSupported,
 } from "./wakelock.ts";
+import { $appleLyrics } from "./lyrics/apply.ts";
 
 export interface SettingsCallbacks {
   getPage: () => HTMLElement | null;
@@ -69,6 +70,12 @@ export function setupSettings(cb: SettingsCallbacks): SettingsHandle {
   applyFont();
 
   const toggles: ToggleDef[] = [
+    {
+      label: "Affichage Apple Music",
+      desc: "Paroles façon Apple Music : flou, ressorts, mot à mot. Désactivé : l'affichage Spicy Lyrics.",
+      get: () => $appleLyrics.get(),
+      set: (v) => $appleLyrics.set(v),
+    },
     {
       label: "Police Spicy Lyrics",
       desc: "Utiliser la police d'origine de l'extension.",

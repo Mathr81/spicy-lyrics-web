@@ -13,6 +13,7 @@
     "fmt": "oxfmt"
   },
   "dependencies": {
+    "@applemusic-like-lyrics/core": "0.6.0",
     "@kawarp/core": "^1.2.0",
     "@nanostores/react": "^1.1.0",
     "@spicemod/creator": "^0.0.35",

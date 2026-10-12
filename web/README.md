@@ -86,6 +86,24 @@ Then push to `main` (or run the workflow manually) and it deploys itself.
 Append `?demo` to the URL to preview the animated lyrics with a built-in sample —
 no Spotify login required. Handy for checking your deployment.
 
+## Apple Music view
+
+Settings → **Affichage Apple Music** swaps the Spicy Lyrics renderer for an
+Apple Music-style one: lines blurred by their distance from the active one,
+spring-driven scrolling, a word-by-word wipe, background vocals, duet lines and
+interlude dots. It is off by default, and switching is live.
+
+The rendering is [AMLL](https://github.com/amll-dev/applemusic-like-lyrics)'s
+`@applemusic-like-lyrics/core` (AGPL-3.0, like this project), loaded on demand so
+the default view doesn't pay for it. `web/src/lyrics/apple.ts` converts the API
+payload to its line model and drives it from the same playback clock. Everything
+around the lyrics — cover, controls, background, sync offset, tap a line to
+seek — is unchanged.
+
+- Unsynced lyrics have no timings to animate and stay on the Spicy renderer.
+- Romanization is shown under each word or line instead of replacing it.
+- The typeface is the system's: San Francisco on iOS, iPadOS and macOS.
+
 ## Installing on iPad / iPhone (PWA)
 
 Safari → Share → **Add to Home Screen**. The installed app runs edge-to-edge:

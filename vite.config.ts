@@ -1,4 +1,4 @@
-import { defineConfig, type Plugin } from "vite";
+import { defineConfig, normalizePath, type Plugin } from "vite";
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -15,7 +15,11 @@ const R = (p: string) => path.resolve(dir, p);
  */
 function swapModules(map: Record<string, string>): Plugin {
   const resolved = new Map<string, string>(
-    Object.entries(map).map(([from, to]) => [R(from), R(to)])
+    // The shim's id is normalized (forward slashes) so it is the same module
+    // the web sources import directly. With Windows' backslashes Rollup saw two
+    // different files and bundled each shim twice — one copy holding the state,
+    // the engine reading the other.
+    Object.entries(map).map(([from, to]) => [R(from), normalizePath(R(to))])
   );
   return {
     name: "spicy-swap-modules",
@@ -107,10 +111,12 @@ export default defineConfig({
     refuseSecretKey(),
   ],
   resolve: {
-    alias: {
+    alias: [
       // Let reused files import from the repo `src/` tree unchanged.
-      "@src": R("src"),
-    },
+      { find: "@src", replacement: R("src") },
+      // AMLL's unused pixi.js background renderer — see the stub.
+      { find: /^@pixi\/.*$/, replacement: R("web/src/shim/pixi-stub.ts") },
+    ],
   },
   build: {
     outDir: R("web/dist"),
