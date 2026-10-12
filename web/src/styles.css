@@ -1084,13 +1084,14 @@ html.sl-ios-standalone .sl-status {
    Music's own background never has one, so the canvas is drawn at a quarter of
    the page, blurred there (cheap at that size) and scaled back up: the edge
    dissolves and the gradient, which has no fine detail, loses nothing. It
-   overscans the page a little so the blur has no transparent rim. */
+   overscans the page by 8% a side: the blur fades the canvas out towards its
+   rim, and at half that the page's own edges were a tenth darker for it. */
 #SpicyLyricsPage .ContentBox .sl-amll-bg {
   position: absolute;
-  top: -4%;
-  left: -4%;
-  width: 27%;
-  height: 27%;
+  top: -8%;
+  left: -8%;
+  width: 29%;
+  height: 29%;
   transform: scale(4);
   transform-origin: 0 0;
   filter: blur(7px);

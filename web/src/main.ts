@@ -48,6 +48,7 @@ import { togglePip, pipSupported } from "./pip.ts";
 import { toggleVideoPip, setPipLyrics } from "./mobilepip.ts";
 import { renderShell, type ShellHandle } from "./ui.ts";
 import { initViewport } from "./viewport.ts";
+import { initSystemBars } from "./systembars.ts";
 import { initWakeLock, setPlaying as setWakeLockPlaying } from "./wakelock.ts";
 import { setupSettings, type SettingsHandle } from "./settings.ts";
 import { setupSync } from "./sync.ts";
@@ -85,6 +86,8 @@ async function main(): Promise<void> {
 
   const root = document.getElementById("SpicyLyricsRoot") as HTMLElement;
   const page = buildPage(root);
+  // Android paints its system bars in a colour taken from the page.
+  initSystemBars();
 
   // Load the Spicy Lyrics webfont (same source as the extension).
   LoadFonts();

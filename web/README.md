@@ -149,6 +149,15 @@ strip) and `styles.css` grows the fixed page host by it, so the page reaches the
 real bottom edge again. Scoped to installed iOS/iPadOS apps; nothing changes in a
 Safari tab or on any other platform.
 
+### Android: the system bars
+
+An installed app on Android is not drawn under the status bar or the gesture
+bar; Chrome paints both in a flat colour taken from the page. `web/src/systembars.ts`
+makes that colour follow the background — its top edge for the status bar
+(`theme-color`), its bottom edge for the page background — re-read every second
+as the background flows, so the bars blend into the page instead of framing it
+in black. The page still stops at the bars: only Chrome can draw under them.
+
 ### Keeping the screen on
 
 The page holds a **Screen Wake Lock** while something is playing, so the iPad
