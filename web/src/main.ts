@@ -41,6 +41,7 @@ import {
   swapNowBarSide,
   toggleCompactMode,
   isCompactModeActive,
+  setPaused,
 } from "./renderer.ts";
 import { setupMediaBoxControls, type MediaBoxHandle } from "./mediabox.ts";
 import { togglePip, pipSupported } from "./pip.ts";
@@ -176,6 +177,7 @@ async function main(): Promise<void> {
 function handleSnapshot(snap: AdapterSnapshot): void {
   updateNowBar(snap.track);
   setWakeLockPlaying(snap.isPlaying);
+  setPaused(!snap.isPlaying);
 
   const hasTrack = !!snap.track;
   if (hasTrack !== hadTrack) {

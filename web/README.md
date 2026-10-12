@@ -88,21 +88,42 @@ no Spotify login required. Handy for checking your deployment.
 
 ## Apple Music view
 
-Settings → **Affichage Apple Music** swaps the Spicy Lyrics renderer for an
-Apple Music-style one: lines blurred by their distance from the active one,
-spring-driven scrolling, a word-by-word wipe, background vocals, duet lines and
-interlude dots. It is off by default, and switching is live.
+Settings → **Affichage Apple Music** swaps the Spicy Lyrics look for Apple
+Music's. It is off by default, and switching is live.
+
+- **Lyrics**: lines blurred by their distance from the active one, spring-driven
+  scrolling, a word-by-word wipe, background vocals, duet lines, interlude dots.
+  The active line sits level with the centre of the cover.
+- **Background**: the animated mesh gradient of the cover, in place of the Spicy
+  background (which is stopped meanwhile, not left rendering underneath).
+- **Cover and titles**: the cover takes Apple Music's size and shadow and steps
+  back when playback pauses; title and artist are set left under it.
 
 The rendering is [AMLL](https://github.com/amll-dev/applemusic-like-lyrics)'s
 `@applemusic-like-lyrics/core` (AGPL-3.0, like this project), loaded on demand so
-the default view doesn't pay for it. `web/src/lyrics/apple.ts` converts the API
-payload to its line model and drives it from the same playback clock. Everything
-around the lyrics — cover, controls, background, sync offset, tap a line to
-seek — is unchanged.
+the default view doesn't pay for it. Sizes, weights, fades and the 45/55 split
+are those of AMLL's own Apple Music player (`packages/react-full`), kept in
+`web/src/styles.css`; `web/src/lyrics/apple.ts` converts the API payload to
+AMLL's line model and drives it from the same playback clock.
 
+- The typeface is San Francisco where the system has it (iOS, iPadOS, macOS).
+  Apple doesn't license it for the web, so elsewhere it is Inter, bundled and
+  only downloaded when needed.
+- The playback controls stay the extension's, on the cover; Apple Music's
+  transport bar is not reproduced. The narrow (compact) layout keeps the
+  extension's header too.
 - Unsynced lyrics have no timings to animate and stay on the Spicy renderer.
 - Romanization is shown under each word or line instead of replacing it.
-- The typeface is the system's: San Francisco on iOS, iPadOS and macOS.
+
+### Lines that ignore the pointer
+
+Settings → **Lignes interactives** (on by default). Turned off, lyric lines stop
+reacting to the pointer in both views: no hover highlight, no un-blur on hover,
+and a tap no longer seeks. Scrolling through the lyrics still works.
+
+AMLL un-blurs its lines on hover with an `!important` rule that no stylesheet
+can override, so `vite.config.ts` rewrites that one selector at build time
+(`amllHoverOptOut`) and fails the build if an AMLL upgrade moves it.
 
 ## Installing on iPad / iPhone (PWA)
 

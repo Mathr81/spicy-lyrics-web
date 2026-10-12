@@ -8,13 +8,17 @@ import { EmitNotApplyed } from "@src/utils/Lyrics/Applyer/OnApply.ts";
 import { DestroyAllLyricsContainers } from "@src/utils/Lyrics/Applyer/CreateLyricsContainer.ts";
 import { ClearLyricsContentArrays, setRomanizedStatus } from "@src/utils/Lyrics/lyrics.ts";
 import { $currentLyricsType, $currentLyricsData, persistAtom } from "@src/utils/stores.ts";
+import { PageContainer } from "../shim/PageView.ts";
+import { SpotifyPlayer } from "../shim/SpotifyPlayer.ts";
+import type * as AppleView from "./apple.ts";
 
 /** Settings → "Affichage Apple Music". Off = the Spicy Lyrics renderer. */
 export const $appleLyrics = persistAtom<boolean>("web:appleLyrics", false);
 
 // Set once the Apple Music view's chunk has loaded; until then there is nothing
 // of it on screen to hide.
-let hideAppleLyrics: (() => void) | null = null;
+let appleView: typeof AppleView | null = null;
+const loadAppleView = () => import("./apple.ts").then((view) => (appleView = view));
 let last: { data: any; romanize: boolean } | null = null;
 
 function clearSpicy(): void {
@@ -24,7 +28,7 @@ function clearSpicy(): void {
 }
 
 function applySpicy(data: any, romanize: boolean): void {
-  hideAppleLyrics?.();
+  appleView?.hideAppleLyrics();
   if (data.Type === "Syllable") {
     ApplySyllableLyrics(data, romanize);
   } else if (data.Type === "Line") {
@@ -48,9 +52,8 @@ export function applyLyrics(data: any, romanize: boolean): void {
   }
 
   clearSpicy();
-  void import("./apple.ts")
+  void loadAppleView()
     .then((view) => {
-      hideAppleLyrics = view.hideAppleLyrics;
       // The track, the romanization or the setting may have changed meanwhile.
       if (last?.data !== data || last.romanize !== romanize || !$appleLyrics.get()) return;
       if (!view.showAppleLyrics(data, romanize)) applySpicy(data, romanize);
@@ -63,13 +66,32 @@ export function applyLyrics(data: any, romanize: boolean): void {
 
 export function clearLyrics(): void {
   last = null;
-  hideAppleLyrics?.();
+  appleView?.hideAppleLyrics();
   clearSpicy();
   $currentLyricsType.set("None");
   $currentLyricsData.set("");
 }
 
+/**
+ * The page-level half of the setting: the class the Apple Music styling keys on
+ * and the background. Called whenever the setting or the cover changes.
+ */
+export function syncAppleChrome(): void {
+  const on = $appleLyrics.get();
+  PageContainer?.classList.toggle("sl-apple", on);
+  if (!on) {
+    appleView?.setAppleBackground(null);
+    return;
+  }
+  void loadAppleView()
+    .then((view) => {
+      if ($appleLyrics.get()) view.setAppleBackground(SpotifyPlayer.GetCover("large") ?? null);
+    })
+    .catch((err) => console.error("[SpicyLyrics] Apple Music view failed to load", err));
+}
+
 // Switching views re-renders the lyrics already on screen.
 $appleLyrics.listen(() => {
+  syncAppleChrome();
   if (last) applyLyrics(last.data, last.romanize);
 });

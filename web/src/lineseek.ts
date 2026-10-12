@@ -9,9 +9,16 @@
 // `StartTime + offset` of the audio, so that is where playback must land for
 // the line to be the active one straight away.
 import { LyricsObject } from "@src/utils/Lyrics/lyrics.ts";
-import { $playbackOffset, $seekFadeCompensation } from "@src/utils/stores.ts";
+import { $playbackOffset, $seekFadeCompensation, persistAtom } from "@src/utils/stores.ts";
 import Global from "@src/components/Global/Global.ts";
 import { SpotifyPlayer } from "./shim/SpotifyPlayer.ts";
+
+/**
+ * Settings → "Lignes interactives". Off = lyric lines ignore the pointer: no
+ * hover highlight, no tap-to-seek, in either view. It is enforced in CSS
+ * (`pointer-events`, styles.css), which is why nothing below reads it.
+ */
+export const $lineInteraction = persistAtom<boolean>("web:lineInteraction", true);
 
 // Same value as the extension: Spotify fades audio in after a seek, which
 // swallows a fast line's first syllable when landing exactly on it.

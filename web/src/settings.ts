@@ -16,6 +16,7 @@ import {
   wakeLockSupported,
 } from "./wakelock.ts";
 import { $appleLyrics } from "./lyrics/apply.ts";
+import { $lineInteraction } from "./lineseek.ts";
 
 export interface SettingsCallbacks {
   getPage: () => HTMLElement | null;
@@ -69,12 +70,25 @@ export function setupSettings(cb: SettingsCallbacks): SettingsHandle {
     cb.getPage()?.classList.toggle("UseSpicyFont", !$skipSpicyFont.get());
   applyFont();
 
+  const applyLineInteraction = () =>
+    cb.getPage()?.classList.toggle("sl-no-line-interaction", !$lineInteraction.get());
+  applyLineInteraction();
+
   const toggles: ToggleDef[] = [
     {
       label: "Affichage Apple Music",
-      desc: "Paroles façon Apple Music : flou, ressorts, mot à mot. Désactivé : l'affichage Spicy Lyrics.",
+      desc: "Paroles, fond et pochette façon Apple Music. Désactivé : l'affichage Spicy Lyrics.",
       get: () => $appleLyrics.get(),
       set: (v) => $appleLyrics.set(v),
+    },
+    {
+      label: "Lignes interactives",
+      desc: "Survol des lignes, et toucher une ligne pour s'y rendre. Désactivé : les paroles ne réagissent plus au pointeur.",
+      get: () => $lineInteraction.get(),
+      set: (v) => {
+        $lineInteraction.set(v);
+        applyLineInteraction();
+      },
     },
     {
       label: "Police Spicy Lyrics",

@@ -90,6 +90,26 @@ function refuseSecretKey(): Plugin {
   };
 }
 
+/**
+ * AMLL un-blurs every line while the pointer is over its player, with
+ * `!important`, so no stylesheet of ours can switch that off. Scope the rule to
+ * pages where line interaction is on (Settings → "Lignes interactives").
+ */
+function amllHoverOptOut(): Plugin {
+  const rule = /&:hover (\.\w+_lyricLine), &:hover (\.\w+_lyricLineWrapper) \{/;
+  const on = "#SpicyLyricsPage:not(.sl-no-line-interaction) &:hover";
+  return {
+    name: "spicy-amll-hover-opt-out",
+    enforce: "pre",
+    transform(code, id) {
+      if (!normalizePath(id).includes("@applemusic-like-lyrics/core/dist/style.css")) return null;
+      // Fail the build rather than silently lose the setting on an AMLL upgrade.
+      if (!rule.test(code)) this.error("AMLL's hover rule has changed; update amllHoverOptOut");
+      return code.replace(rule, `${on} $1, ${on} $2 {`);
+    },
+  };
+}
+
 export default defineConfig({
   root: R("web"),
   base: "./",
@@ -108,6 +128,7 @@ export default defineConfig({
       "src/utils/Lyrics/ProcessLyrics.ts": "web/src/shim/ProcessLyrics.ts",
     }),
     caseInsensitiveResolve(),
+    amllHoverOptOut(),
     refuseSecretKey(),
   ],
   resolve: {

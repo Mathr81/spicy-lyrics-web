@@ -27,6 +27,7 @@ import {
 import { ApplyExperimentClasses, onExperimentChange } from "@src/utils/experiments.ts";
 import type { SimpleTrack } from "./spotify/api.ts";
 import { enableLineSeek } from "./lineseek.ts";
+import { syncAppleChrome } from "./lyrics/apply.ts";
 
 // iOS/iPadOS Safari throttles `scroll-behavior: smooth`, which makes the
 // active-line auto-scroll crawl and the lyrics drift. Detect it so the CSS can
@@ -91,6 +92,7 @@ export function buildPage(root: HTMLElement): HTMLElement {
 
   page = el;
   setPageContainer(el);
+  syncAppleChrome();
   enableLineSeek(el.querySelector<HTMLElement>(".LyricsContent")!);
   $lyricsContainerExists.set(true);
 
@@ -169,6 +171,11 @@ export function isCompactModeActive(): boolean {
   return !!page?.classList.contains("CompactMode");
 }
 
+/** Play state as a page class, for styling that follows it (the Apple Music cover). */
+export function setPaused(paused: boolean): void {
+  page?.classList.toggle("sl-paused", paused);
+}
+
 let lastCover: string | null = null;
 
 export function updateNowBar(track: SimpleTrack | null): void {
@@ -186,7 +193,9 @@ export function updateNowBar(track: SimpleTrack | null): void {
     if (to) to.style.backgroundImage = `url("${track.cover}")`;
     if (from) from.style.backgroundImage = `url("${track.cover}")`;
     const contentBox = getContentBox();
-    if (contentBox) void ApplyDynamicBackground(contentBox, "lpagebg");
+    // The Apple Music background follows the cover too, and has to re-stop the
+    // Spicy one, which this call restarts.
+    if (contentBox) void ApplyDynamicBackground(contentBox, "lpagebg").finally(syncAppleChrome);
   }
 }
 

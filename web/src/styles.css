@@ -991,37 +991,165 @@ html.sl-ios-standalone .sl-status {
 }
 
 /* --- Apple Music view (lyrics/apple.ts) --------------------------------------
-   AMLL's player is appended to .LyricsContainer next to the Spicy .LyricsContent,
-   which stays in the DOM — notices and unsynced lyrics still render there — and
-   is only hidden while the Apple Music view has lyrics on screen. */
+   Two page classes drive it. `.sl-apple` is on whenever the setting is: the
+   background, the typeface and the cover follow it. `.sl-apple-lyrics` is on
+   only while AMLL's player has lyrics on screen — it is appended to
+   .LyricsContainer next to the Spicy .LyricsContent, which stays in the DOM
+   (notices and unsynced lyrics still render there) and is hidden meanwhile.
+
+   The metrics are those of AMLL's own Apple Music player (react-full, layout/
+   horizontal + vertical): type size, weight, edge fades, cover shadow and
+   pause shrink, title and artist. */
+#SpicyLyricsPage {
+  /* San Francisco where the system has it (iOS, iPadOS, macOS); Inter, its
+     closest open relative, elsewhere. */
+  --sl-apple-font:
+    -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter Variable", "Segoe UI", system-ui,
+    sans-serif;
+}
+
 #SpicyLyricsPage.sl-apple-lyrics .LyricsContainer .LyricsContent {
   display: none !important;
 }
 
-#SpicyLyricsPage .LyricsContainer .sl-amll {
-  /* The same column the Spicy lines occupy, in every layout: these two
-     variables are what the engine CSS offsets its own lines by. AMLL pads each
-     line for its hover highlight, so the column is widened by that much to keep
-     the text itself on the Spicy column. */
-  --lyric-line-padding-x: 0.4em;
-  align-self: stretch;
-  width: auto;
-  margin-left: calc(var(--LyricsLeftSidePadding) - 0.4em);
-  margin-right: calc(var(--LyricsRightSidePadding) - 0.4em);
-  /* The Spicy lyric size (Lyrics/main.css), a touch larger as Apple Music's is. */
-  font-size: clamp(1.85rem, 3.7cqw, 3.5rem);
-  /* San Francisco where the system has it (iOS, iPadOS, macOS). */
-  font-family:
-    -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", "Segoe UI", system-ui,
-    sans-serif;
-  font-weight: 700;
-  /* Lines fade out at both edges instead of being cut off. */
-  -webkit-mask-image: linear-gradient(transparent, #000 12%, #000 82%, transparent);
-  mask-image: linear-gradient(transparent, #000 12%, #000 82%, transparent);
+#SpicyLyricsPage {
+  /* AMLL's horizontal layout: the cover's side takes 45% of the width, the
+     lyrics the rest, with the far 8% of their column (15% on a large screen)
+     left empty. */
+  --sl-apple-cover-side: 45cqw;
+  --sl-apple-lyric-gutter: 4.4cqw;
 }
 
-/* Cover on the right: the engine mirrors the column the same way. */
-#SpicyLyricsPage.NowBarSide__Right:not(.CompactMode) .LyricsContainer .sl-amll {
-  margin-left: calc(var(--LyricsRightSidePadding) * 1.45 - 0.4em);
-  margin-right: calc(var(--LyricsLeftSidePadding) - 0.4em);
+@media (min-width: 1601px) and (min-height: 1001px) {
+  #SpicyLyricsPage {
+    --sl-apple-lyric-gutter: 8.25cqw;
+  }
+}
+
+#SpicyLyricsPage .LyricsContainer .sl-amll {
+  align-self: stretch;
+  width: auto;
+  margin-left: calc(var(--sl-apple-cover-side) + 8px);
+  margin-right: var(--sl-apple-lyric-gutter);
+  /* AMLL's size, kept from outgrowing the column in a narrow window. */
+  font-size: max(min(max(5vh, 2.5vw), 4.4vw), 12px);
+  font-weight: 600;
+  /* Lines fade out at both edges instead of being cut off. */
+  -webkit-mask-image: linear-gradient(transparent, #000 10%, #000 90%, transparent);
+  mask-image: linear-gradient(transparent, #000 10%, #000 90%, transparent);
+}
+
+/* `!important`, on the descendants too: that is how the engine applies the
+   Spicy Lyrics font (`.UseSpicyFont *`, default.css). */
+#SpicyLyricsPage .LyricsContainer .sl-amll,
+#SpicyLyricsPage .LyricsContainer .sl-amll *,
+#SpicyLyricsPage.sl-apple .ContentBox .NowBar .Header .Metadata,
+#SpicyLyricsPage.sl-apple .ContentBox .NowBar .Header .Metadata * {
+  font-family: var(--sl-apple-font) !important;
+}
+
+/* Cover on the right (a Spicy Lyrics layout Apple Music doesn't have): mirrored. */
+#SpicyLyricsPage.NowBarSide__Right .LyricsContainer .sl-amll {
+  margin-left: var(--sl-apple-lyric-gutter);
+  margin-right: calc(var(--sl-apple-cover-side) + 8px);
+}
+
+/* Stacked under the extension's compact header: the column the Spicy lines use
+   there (these two variables are what the engine offsets them by; AMLL pads each
+   line for its hover highlight, hence the 0.4em). The line sits near the top,
+   so only that edge fades. */
+#SpicyLyricsPage.CompactMode .LyricsContainer .sl-amll {
+  --lyric-line-padding-x: 0.4em;
+  margin-left: calc(var(--LyricsLeftSidePadding) - 0.4em);
+  margin-right: calc(var(--LyricsRightSidePadding) - 0.4em);
+  font-size: clamp(19px, 8vw, max(5vh, 2.5vw, 24px));
+  -webkit-mask-image: linear-gradient(transparent, #000 10%);
+  mask-image: linear-gradient(transparent, #000 10%);
+}
+
+/* The animated mesh gradient, where the Spicy background was. */
+#SpicyLyricsPage .ContentBox .sl-amll-bg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: -1;
+  pointer-events: none;
+}
+
+#SpicyLyricsPage.sl-apple .ContentBox .spicy-dynamic-bg {
+  display: none;
+}
+
+/* Cover, title and artist. Left alone in the compact layout, which is the
+   extension's own header rather than Apple Music's. */
+#SpicyLyricsPage.sl-apple:not(.CompactMode) {
+  --NowBarWidth: min(50cqh, 38cqw);
+  /* Centred in its side. */
+  --NowBarLeftSpacing: calc((var(--sl-apple-cover-side) - var(--NowBarWidth)) / 2);
+}
+
+#SpicyLyricsPage.sl-apple:not(.CompactMode) .ContentBox .NowBar .Header .MediaBox {
+  transition: transform 0.5s cubic-bezier(0.3, 0.2, 0.2, 1.4);
+}
+
+/* Paused, the cover steps back. */
+#SpicyLyricsPage.sl-apple.sl-paused:not(.CompactMode) .ContentBox .NowBar .Header .MediaBox {
+  transform: scale(0.75);
+  transition: transform 0.6s cubic-bezier(0.4, 0.2, 0.1, 1);
+}
+
+#SpicyLyricsPage.sl-apple:not(.CompactMode)
+  .ContentBox
+  .NowBar
+  .Header
+  .MediaBox
+  .MediaImageContainer {
+  box-shadow: 0 1em 1.2em rgba(0, 0, 0, 0.19);
+  opacity: 1;
+}
+
+#SpicyLyricsPage.sl-apple:not(.CompactMode) .ContentBox .NowBar .Header .Metadata {
+  align-items: flex-start;
+}
+
+#SpicyLyricsPage.sl-apple:not(.CompactMode) .ContentBox .NowBar .Header .Metadata .SongName,
+#SpicyLyricsPage.sl-apple:not(.CompactMode) .ContentBox .NowBar .Header .Metadata .Artists {
+  /* Full width, so the fade below sits on the column's edge and only ever
+     touches a title too long for it. */
+  width: 100%;
+  max-width: 100%;
+  font-size: max(2vh, 1em) !important;
+  line-height: 1.25em !important;
+  letter-spacing: 0.4px;
+  text-align: left;
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 2em), transparent);
+  mask-image: linear-gradient(90deg, #000 calc(100% - 2em), transparent);
+}
+
+#SpicyLyricsPage.sl-apple:not(.CompactMode) .ContentBox .NowBar .Header .Metadata .SongName {
+  font-weight: 500;
+  opacity: 0.9;
+}
+
+#SpicyLyricsPage.sl-apple:not(.CompactMode) .ContentBox .NowBar .Header .Metadata .Artists {
+  font-weight: 400;
+  opacity: 0.45;
+}
+
+#SpicyLyricsPage.sl-apple:not(.CompactMode) .ContentBox .NowBar .Header .Metadata .SongName span,
+#SpicyLyricsPage.sl-apple:not(.CompactMode) .ContentBox .NowBar .Header .Metadata .Artists > span {
+  padding: 0;
+  text-align: left;
+}
+
+/* --- Settings → "Lignes interactives" off -----------------------------------
+   Lines stop being pointer targets, so neither view highlights them on hover or
+   seeks on a tap. Scrolling still works: the event lands on what is underneath
+   — the Spicy scroll container, or AMLL's player, which is where each listens.
+   AMLL's hover un-blur is the one thing this cannot reach; vite.config.ts scopes
+   that rule to pages without this class. */
+#SpicyLyricsPage.sl-no-line-interaction .LyricsContainer .LyricsContent .line,
+#SpicyLyricsPage.sl-no-line-interaction .LyricsContainer .sl-amll > * {
+  pointer-events: none !important;
 }
