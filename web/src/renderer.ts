@@ -78,6 +78,9 @@ export function buildPage(root: HTMLElement): HTMLElement {
   el.classList.add("SpicyRenderer", "UseSpicyFont", "Fullscreen");
   // The NowBar starts on the left; the side-swap control flips this pair.
   el.classList.add("NowBarSide__Left");
+  // The page-level mirror of the NowBar's `.Active`, which the engine CSS keys
+  // the lyrics column's offset on. The NowBar is always open here.
+  el.classList.add("NowBarStatus__Open");
   if (IS_IOS) el.classList.add("iOS");
   el.innerHTML = PAGE_HTML;
   root.appendChild(el);

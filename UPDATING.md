@@ -78,6 +78,12 @@ bun run web:preview  # smoke-test the lyrics render, sync, controls
 - **Build OK but something's broken at runtime** (e.g. lyrics don't sync, cover
   controls misbehave)? An interface a shim implements probably changed — open the
   matching file in `web/src/shim/` and realign it with the new upstream module.
+- **Lyrics render under the cover, or the layout is off?** The engine CSS keys
+  its layout on classes the extension puts on `#SpicyLyricsPage`
+  (`NowBarStatus__Open`, `NowBarSide__Left`/`Right`, `Fullscreen`, …). Here
+  `web/src/renderer.ts` sets them by hand, so when upstream starts keying on a
+  new one, add it there. `git diff <before> <after> -- src/css` shows which
+  page-level selectors changed.
 - **Lyrics API changed?** The page and the proxy use the official developer
   API (`GET /v1/lyrics/{trackId}`), which is versioned in its path and does not
   depend on the extension's version — an upstream bump needs no change there.
