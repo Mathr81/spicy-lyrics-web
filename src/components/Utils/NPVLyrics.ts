@@ -1,3 +1,4 @@
+import { createTooltip } from "../../utils/tooltip.ts";
 // Compact lyrics card injected into Spotify's right-sidebar Now Playing View.
 // Reuses the full synced lyrics pipeline by opening the page (PageView.Open)
 // into the card body in cardMode. Because the pipeline is a global singleton
@@ -39,13 +40,42 @@ let evaluateAgain = false;
 // see holdEvaluateUntilSettled.
 let stateAnimation: Promise<unknown> | null = null;
 
-const getNPV = (): HTMLElement | null =>
+// Spotify's newer NPV layout (rolled out remotely to 1.3.3) has no test id on the
+// panel's content or artwork. Its cover block holds either the Canvas surface or
+// the cover-art slot, and the block after it holds the title, the sections
+// (Spotify's lyrics preview first, when the song has one) and "Next in queue".
+const NPV_COVER_MARKERS = "[data-canvas-surface], [data-testid='cover-art-slot']";
+
+export const GetNPVElement = (): HTMLElement | null =>
   document.querySelector<HTMLElement>(
-    ".Root__right-sidebar aside.NowPlayingView"
+    "aside.NowPlayingView"
   ) ??
   document.querySelector<HTMLElement>(
-    ".Root__right-sidebar aside#Desktop_PanelContainer_Id:has(.main-nowPlayingView-coverArtContainer)"
+    `aside#Desktop_PanelContainer_Id:has([data-testid='NPV_Panel_OpenDiv'], .main-nowPlayingView-coverArtContainer, ${NPV_COVER_MARKERS})`
   );
+
+/**
+ * The NPV the dynamic background can use, or null. The newer layout isn't
+ * styled for it yet: its panel and section cards paint opaque backgrounds that
+ * would hide the canvas, which would still be rendering every frame.
+ */
+export const GetNPVElementForBackground = (): HTMLElement | null => {
+  const npv = GetNPVElement();
+  if (!npv) return null;
+  const restyled =
+    !npv.matches("aside.NowPlayingView") &&
+    !npv.querySelector("[data-testid='NPV_Panel_OpenDiv'], .main-nowPlayingView-coverArtContainer");
+  return restyled ? null : npv;
+};
+
+export function GetNPVObserverRoot(): Element | null {
+  const panel = document.getElementById("Desktop_PanelContainer_Id") ?? GetNPVElement();
+  // The top container's child holding the panel is what .Root__right-sidebar
+  // names on older builds, so swaps of it still reach the top observer.
+  return document.querySelector(".Root__right-sidebar") ??
+    panel?.closest(".Root__top-container > *") ??
+    panel?.closest("[aria-hidden]") ?? panel?.parentElement ?? null;
+}
 
 export function NPVCardOwnsPage(): boolean {
   return cardOwnsPage;
@@ -89,9 +119,9 @@ function hiddenForMissingLyrics(): boolean {
 
 function desiredState(): CardState {
   if ($disableNpvLyrics.get()) return "DORMANT";
-  const npv = getNPV();
+  const npv = GetNPVElement();
   // closest("[inert]") covers the whole .Root__right-sidebar <-> aside chain
-  if (!npv || !npv.isConnected || npv.closest("[inert]")) return "DORMANT";
+  if (!npv || !npv.isConnected || npv.closest('[inert], [hidden], [aria-hidden="true"]')) return "DORMANT";
   const pageBusyElsewhere =
     (PageView.IsOpened && !cardOwnsPage) ||
     IsPIP ||
@@ -133,6 +163,58 @@ function clearExpandedIfDetached(): void {
 }
 
 function insertCard(npv: HTMLElement, el: HTMLElement): boolean {
+  const modernContent = npv.querySelector('[data-testid="NPV_Panel_OpenDiv"]');
+  if (modernContent) {
+    const nativeLyrics = modernContent.querySelector('[data-testid="lyrics-npv-section"]');
+    if (nativeLyrics?.parentElement === modernContent) {
+      if (el.parentElement !== modernContent || el.nextElementSibling !== nativeLyrics) {
+        nativeLyrics.insertAdjacentElement("beforebegin", el);
+      }
+    } else {
+      const artwork = modernContent.querySelector('[data-testid="track-visual-enhancement"]');
+      let section: Element | null = artwork;
+      while (section && section.parentElement !== modernContent) section = section.parentElement;
+      if (section) {
+        if (section.nextElementSibling !== el) section.insertAdjacentElement("afterend", el);
+      } else if (modernContent.firstElementChild !== el) {
+        modernContent.prepend(el);
+      }
+    }
+    return true;
+  }
+  const coverMarker = npv.querySelector(NPV_COVER_MARKERS);
+  if (coverMarker) {
+    const nativeLyrics = npv.querySelector('[data-testid="lyrics-npv-section"]');
+    if (nativeLyrics) {
+      if (el.nextElementSibling !== nativeLyrics) nativeLyrics.insertAdjacentElement("beforebegin", el);
+      return true;
+    }
+    // No lyrics preview for this song.
+    let coverBlock: Element = coverMarker;
+    while (coverBlock.parentElement && coverBlock.parentElement !== npv && coverBlock.parentElement.children.length < 2) {
+      coverBlock = coverBlock.parentElement;
+    }
+    let info = coverBlock.nextElementSibling;
+    if (info === el) info = el.nextElementSibling;
+    if (!info) {
+      // Nothing below the cover yet: sit right under it.
+      if (coverBlock.nextElementSibling !== el) coverBlock.insertAdjacentElement("afterend", el);
+      return true;
+    }
+    // Right under the title, which spaces the same as the top of the sections
+    // (both stack with a 16px gap) and works when there are no sections at all.
+    // Local files have no album link, so fall back to the first block with text.
+    const infoBlocks = [...info.children].filter((child) => child !== el);
+    const title =
+      infoBlocks.find((child) => child.querySelector('a[href^="/album/"], a[href^="/show/"], a[href^="/episode/"]')) ??
+      infoBlocks.find((child) => child.textContent?.trim());
+    if (title) {
+      if (title.nextElementSibling !== el) title.insertAdjacentElement("afterend", el);
+    } else if (info.firstElementChild !== el) {
+      info.prepend(el);
+    }
+    return true;
+  }
   const cover = npv.querySelector(".main-nowPlayingView-coverArtContainer");
   const anchor =
     cover?.closest(".main-nowPlayingView-nowPlayingWidget") ??
@@ -155,7 +237,7 @@ function insertCard(npv: HTMLElement, el: HTMLElement): boolean {
 
 function setTooltip(target: Element, content: string, maidKey: string): void {
   try {
-    const tip = Spicetify.Tippy(target, {
+    const tip = createTooltip(target, {
       ...Spicetify.TippyProps,
       content,
     });
@@ -350,6 +432,27 @@ function refreshCardUI(): void {
   }
 }
 
+// The card's ancestors, marked for expanded mode, which hides everything beside
+// them. The legacy layout has its own .main-nowPlayingView-* rules instead.
+let stretchHosts: HTMLElement[] = [];
+
+// Rerun whenever the card may have moved: a host left unmarked after a move
+// (Spotify's lyrics preview arriving late, say) is hidden, and the card with it.
+function markStretchHosts(npv: HTMLElement): void {
+  const next: HTMLElement[] = [];
+  if (
+    cardEl &&
+    (npv.querySelector('[data-testid="NPV_Panel_OpenDiv"]')?.contains(cardEl) ||
+      npv.querySelector(NPV_COVER_MARKERS))
+  ) {
+    for (let host = cardEl.parentElement; host && host !== npv; host = host.parentElement) next.push(host);
+  }
+  if (next.length === stretchHosts.length && next.every((host, i) => host === stretchHosts[i])) return;
+  for (const host of stretchHosts) if (!next.includes(host)) host.classList.remove("SpicyLyrics_NPVStretch");
+  for (const host of next) host.classList.add("SpicyLyrics_NPVStretch");
+  stretchHosts = next;
+}
+
 function renderCardShell(npv: HTMLElement): boolean {
   const el = document.createElement("div");
   el.id = "SpicyLyricsNPVCard";
@@ -368,6 +471,11 @@ function renderCardShell(npv: HTMLElement): boolean {
   cardMaid = new Maid();
   cardEl = el;
   cardMaid.Give(cardEl);
+  markStretchHosts(npv);
+  cardMaid.Give(() => {
+    for (const host of stretchHosts) host.classList.remove("SpicyLyrics_NPVStretch");
+    stretchHosts = [];
+  });
   cardBodyEl = cardEl.querySelector<HTMLElement>(".CardBody");
 
   const expand = cardEl.querySelector<HTMLElement>("#NPVCardExpand");
@@ -430,6 +538,20 @@ async function reconcile(): Promise<void> {
       ? "ACTIVE"
       : "SHELL";
 
+  if (cardEl) {
+    const npv = GetNPVElement();
+    // Spotify reorders its own sections (the lyrics preview arrives late), so put
+    // the card back in its slot. insertCard only moves it when it's out of place.
+    if (
+      npv &&
+      (npv.querySelector('[data-testid="NPV_Panel_OpenDiv"]') === cardEl.parentElement ||
+        npv.querySelector(NPV_COVER_MARKERS))
+    ) {
+      insertCard(npv, cardEl);
+      markStretchHosts(npv);
+    }
+  }
+
   if (desired === current) {
     if (cardEl) refreshCardUI();
     return;
@@ -443,7 +565,7 @@ async function reconcile(): Promise<void> {
   }
 
   if (current === "DORMANT") {
-    const npv = getNPV();
+    const npv = GetNPVElement();
     if (!npv) return;
     // NPV inner content not rendered yet — the sidebar observer retries.
     if (!renderCardShell(npv)) return;
@@ -536,7 +658,7 @@ function holdEvaluateUntilSettled(finished: Promise<unknown>): void {
 let observedSidebar: Element | null = null;
 
 function attachSidebarObserver(): void {
-  const sidebar = document.querySelector(".Root__right-sidebar");
+  const sidebar = GetNPVObserverRoot();
   if (!sidebar || sidebar === observedSidebar) return;
   const observer = new MutationObserver((records) => {
     clearExpandedIfDetached();
@@ -554,7 +676,7 @@ function attachSidebarObserver(): void {
     childList: true,
     subtree: true,
     attributes: true,
-    attributeFilter: ["inert"],
+    attributeFilter: ["inert", "aria-hidden", "hidden", "aria-label"],
   });
   // Keyed Give disconnects the previous observer when the sidebar is swapped.
   watcherMaid.Give(observer, "sidebar-observer");
@@ -570,17 +692,33 @@ function attachWatchers(): void {
   const topContainer = document.querySelector(".Root__top-container");
   const watchRoot =
     topContainer ?? document.querySelector(".Root") ?? document.body;
-  const topObserver = new MutationObserver(() => {
+  // Without .Root__right-sidebar (Spotify 1.3.x) the observer root is found
+  // through the NPV panel, which can mount after we start, deep inside the
+  // sidebar. Watch the whole subtree until it appears, then narrow back down.
+  let watchingSubtree = false;
+  const observeTop = () => {
+    watchingSubtree = topContainer === null || observedSidebar === null;
+    topObserver.observe(watchRoot, { childList: true, subtree: watchingSubtree });
+  };
+  const topObserver = new MutationObserver((records) => {
     clearExpandedIfDetached();
-    if (!observedSidebar || !observedSidebar.isConnected) {
+    if (observedSidebar === null) {
+      attachSidebarObserver();
+      if (observedSidebar !== null && watchingSubtree && topContainer !== null) observeTop();
+      return;
+    }
+    if (records.every(record => cardEl?.contains(record.target))) return;
+    const panelChanged = records.some(record =>
+      [...record.addedNodes, ...record.removedNodes].some(node => node instanceof Element &&
+        (node.matches('aside.NowPlayingView, #Desktop_PanelContainer_Id') ||
+          node.querySelector('aside.NowPlayingView, #Desktop_PanelContainer_Id'))));
+    if (!observedSidebar || !observedSidebar.isConnected || panelChanged) {
       observedSidebar = null;
       attachSidebarObserver();
+      if (observedSidebar === null && !watchingSubtree) observeTop();
     }
   });
-  topObserver.observe(watchRoot, {
-    childList: true,
-    subtree: topContainer === null,
-  });
+  observeTop();
   watcherMaid.Give(topObserver, "top-observer");
 }
 
@@ -623,8 +761,7 @@ export function initNPVLyrics(): void {
 
   Whentil.When(
     () =>
-      document.querySelector(".Root__right-sidebar") ??
-      document.querySelector(".Root"),
+      GetNPVObserverRoot() ?? document.querySelector(".Root") ?? document.body,
     () => {
       attachWatchers();
     }
