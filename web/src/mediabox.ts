@@ -19,7 +19,7 @@ import {
   getSnapshot,
 } from "./spotify/player.ts";
 
-function fmt(ms: number): string {
+export function fmt(ms: number): string {
   if (!Number.isFinite(ms) || ms < 0) ms = 0;
   const total = Math.floor(ms / 1000);
   const m = Math.floor(total / 60);

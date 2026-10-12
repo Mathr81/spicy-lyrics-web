@@ -14,6 +14,8 @@ import type * as AppleView from "./apple.ts";
 
 /** Settings → "Affichage Apple Music". Off = the Spicy Lyrics renderer. */
 export const $appleLyrics = persistAtom<boolean>("web:appleLyrics", false);
+/** Settings → "Fond Apple Music". Off = the Spicy background behind the Apple Music view. */
+export const $appleBackground = persistAtom<boolean>("web:appleBackground", true);
 
 // Set once the Apple Music view's chunk has loaded; until then there is nothing
 // of it on screen to hide.
@@ -78,17 +80,21 @@ export function clearLyrics(): void {
  */
 export function syncAppleChrome(): void {
   const on = $appleLyrics.get();
+  const background = on && $appleBackground.get();
   PageContainer?.classList.toggle("sl-apple", on);
-  if (!on) {
-    appleView?.setAppleBackground(null);
-    return;
-  }
+  PageContainer?.classList.toggle("sl-apple-bg", background);
+  if (!background) appleView?.setAppleBackground(null);
+  if (!on) return;
   void loadAppleView()
     .then((view) => {
-      if ($appleLyrics.get()) view.setAppleBackground(SpotifyPlayer.GetCover("large") ?? null);
+      if (!$appleLyrics.get()) return;
+      view.mountAppleTransport();
+      if ($appleBackground.get()) view.setAppleBackground(SpotifyPlayer.GetCover("large") ?? null);
     })
     .catch((err) => console.error("[SpicyLyrics] Apple Music view failed to load", err));
 }
+
+$appleBackground.listen(syncAppleChrome);
 
 // Switching views re-renders the lyrics already on screen.
 $appleLyrics.listen(() => {

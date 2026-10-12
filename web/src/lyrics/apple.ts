@@ -22,6 +22,8 @@ import { KawarpMap } from "../shim/dynamicBackground.ts";
 import { seekToLyricTime } from "../lineseek.ts";
 import { toLines } from "./amll-lines.ts";
 
+export { mountAppleTransport } from "./apple-transport.ts";
+
 const PAGE_CLASS = "sl-apple-lyrics";
 // The clock's jitter filter (shim/SpotifyPlayer.ts) treats anything under this
 // as noise; so do we.

@@ -15,7 +15,7 @@ import {
   setWakeLockEnabled,
   wakeLockSupported,
 } from "./wakelock.ts";
-import { $appleLyrics } from "./lyrics/apply.ts";
+import { $appleLyrics, $appleBackground } from "./lyrics/apply.ts";
 import { $lineInteraction } from "./lineseek.ts";
 
 export interface SettingsCallbacks {
@@ -80,6 +80,12 @@ export function setupSettings(cb: SettingsCallbacks): SettingsHandle {
       desc: "Paroles, fond et pochette façon Apple Music. Désactivé : l'affichage Spicy Lyrics.",
       get: () => $appleLyrics.get(),
       set: (v) => $appleLyrics.set(v),
+    },
+    {
+      label: "Fond Apple Music",
+      desc: "Avec l'affichage Apple Music : son dégradé animé. Désactivé : le fond Spicy Lyrics derrière les paroles Apple Music.",
+      get: () => $appleBackground.get(),
+      set: (v) => $appleBackground.set(v),
     },
     {
       label: "Lignes interactives",

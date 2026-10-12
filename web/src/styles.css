@@ -1054,30 +1054,51 @@ html.sl-ios-standalone .sl-status {
   margin-right: calc(var(--sl-apple-cover-side) + 8px);
 }
 
-/* Stacked under the extension's compact header: the column the Spicy lines use
-   there (these two variables are what the engine offsets them by; AMLL pads each
-   line for its hover highlight, hence the 0.4em). The line sits near the top,
-   so only that edge fades. */
+/* Stacked under the header (compact layout): the lyrics take the full width,
+   as in AMLL's vertical layout, and AMLL's own line padding (20px on a phone)
+   lines the text up with the cover. The active line sits near the top, so that
+   is the edge that fades; the bottom one fades into the transport. */
 #SpicyLyricsPage.CompactMode .LyricsContainer .sl-amll {
+  margin-left: 0;
+  margin-right: 0;
+  font-size: clamp(19px, 8vw, max(5vh, 2.5vw, 24px));
+  -webkit-mask-image: linear-gradient(transparent, #000 10%, #000 94%, transparent);
+  mask-image: linear-gradient(transparent, #000 10%, #000 94%, transparent);
+}
+
+/* The Document PiP window keeps the engine's own compact layout and its side
+   paddings (see the phone layout section above), so AMLL follows those there. */
+.spicy-pip-wrapper #SpicyLyricsPage.CompactMode .LyricsContainer .sl-amll {
   --lyric-line-padding-x: 0.4em;
   margin-left: calc(var(--LyricsLeftSidePadding) - 0.4em);
   margin-right: calc(var(--LyricsRightSidePadding) - 0.4em);
-  font-size: clamp(19px, 8vw, max(5vh, 2.5vw, 24px));
   -webkit-mask-image: linear-gradient(transparent, #000 10%);
   mask-image: linear-gradient(transparent, #000 10%);
 }
 
-/* The animated mesh gradient, where the Spicy background was. */
+/* The animated mesh gradient, where the Spicy background was (Settings → "Fond
+   Apple Music"; off, the Spicy one stays).
+
+   AMLL maps the cover onto a mesh that folds over itself as it flows, and now
+   and then a fold shows as a hard curved edge crossing the screen. Apple
+   Music's own background never has one, so the canvas is drawn at a quarter of
+   the page, blurred there (cheap at that size) and scaled back up: the edge
+   dissolves and the gradient, which has no fine detail, loses nothing. It
+   overscans the page a little so the blur has no transparent rim. */
 #SpicyLyricsPage .ContentBox .sl-amll-bg {
   position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
+  top: -4%;
+  left: -4%;
+  width: 27%;
+  height: 27%;
+  transform: scale(4);
+  transform-origin: 0 0;
+  filter: blur(7px);
   z-index: -1;
   pointer-events: none;
 }
 
-#SpicyLyricsPage.sl-apple .ContentBox .spicy-dynamic-bg {
+#SpicyLyricsPage.sl-apple-bg .ContentBox .spicy-dynamic-bg {
   display: none;
 }
 
@@ -1141,6 +1162,198 @@ html.sl-ios-standalone .sl-status {
 #SpicyLyricsPage.sl-apple:not(.CompactMode) .ContentBox .NowBar .Header .Metadata .Artists > span {
   padding: 0;
   text-align: left;
+}
+
+/* --- Apple Music view, phone layout -----------------------------------------
+   AMLL's vertical layout: a small cover with title and artist beside it, the
+   lyrics across the full width, and Apple Music's transport underneath
+   (lyrics/apple-transport.ts) in place of the mini player's play button. A tap
+   on the cover or the title still opens the card with every control.
+
+   Main window only, like the phone layout it restyles. */
+#SpicyLyricsRoot > #SpicyLyricsPage.sl-apple.CompactMode {
+  --sl-apple-side: 20px;
+  --sl-mini: 72px;
+  --sl-apple-button: clamp(56px, 10vh, 84px);
+  --sl-apple-transport: calc(
+    24px + 22px + var(--sl-apple-button) + max(16px, env(safe-area-inset-bottom, 0px)) + 8px
+  );
+  --LyricsLeftSidePadding: var(--sl-apple-side) !important;
+  --LyricsRightSidePadding: var(--sl-apple-side) !important;
+}
+
+@media (min-width: 481px) {
+  #SpicyLyricsRoot > #SpicyLyricsPage.sl-apple.CompactMode {
+    --sl-apple-side: 3em;
+    --sl-mini: 96px;
+  }
+}
+
+#SpicyLyricsRoot
+  > #SpicyLyricsPage.sl-apple.CompactMode
+  .ContentBox
+  .NowBar
+  .Header
+  .MediaBox
+  .MediaImageContainer {
+  border-radius: 8px;
+  --BorderRadius: 8px;
+  box-shadow: 0 1em 1.2em rgba(0, 0, 0, 0.19);
+}
+
+/* Collapsed only: open, the card lays the title out under the artwork itself. */
+#SpicyLyricsRoot
+  > #SpicyLyricsPage.sl-apple.CompactMode:not(.sl-controls-live)
+  .ContentBox
+  .NowBar
+  .Header
+  .Metadata {
+  left: calc(var(--sl-mini) + 1em);
+  right: 0;
+  gap: 0;
+}
+
+#SpicyLyricsRoot
+  > #SpicyLyricsPage.sl-apple.CompactMode:not(.sl-controls-live)
+  .ContentBox
+  .NowBar
+  .Header
+  .Metadata
+  :is(.SongName, .Artists) {
+  font-size: clamp(1rem, 2vh, 1.25rem) !important;
+  line-height: 1.25 !important;
+  letter-spacing: 0.4px;
+}
+
+#SpicyLyricsRoot > #SpicyLyricsPage.sl-apple.CompactMode .ContentBox .NowBar .Header .Metadata .SongName {
+  font-weight: 500;
+  opacity: 0.9;
+}
+
+#SpicyLyricsRoot > #SpicyLyricsPage.sl-apple.CompactMode .ContentBox .NowBar .Header .Metadata .Artists {
+  font-weight: 400;
+  opacity: 0.45;
+}
+
+#SpicyLyricsRoot > #SpicyLyricsPage.sl-apple.CompactMode .ContentBox .NowBar .Header .sl-mini-play {
+  display: none;
+}
+
+/* The lyrics stop above the transport. */
+#SpicyLyricsRoot > #SpicyLyricsPage.sl-apple.CompactMode .ContentBox .LyricsContainer {
+  padding-bottom: var(--sl-apple-transport);
+  box-sizing: border-box;
+}
+
+#SpicyLyricsPage .sl-apple-transport {
+  display: none;
+}
+
+#SpicyLyricsRoot > #SpicyLyricsPage.sl-apple.CompactMode .sl-apple-transport {
+  display: block;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 15;
+  padding: 0 var(--sl-apple-side) max(16px, env(safe-area-inset-bottom, 0px));
+  color: #fff;
+  mix-blend-mode: plus-lighter;
+  transition: opacity 0.4s ease-out;
+}
+
+#SpicyLyricsPage .sl-apple-transport,
+#SpicyLyricsPage .sl-apple-transport * {
+  font-family: var(--sl-apple-font) !important;
+}
+
+/* Steps back with the lyrics while the card is open over them. */
+#SpicyLyricsRoot > #SpicyLyricsPage.sl-apple.CompactMode.sl-controls-live .sl-apple-transport {
+  opacity: 0.12;
+  pointer-events: none;
+}
+
+.sl-apple-scrub {
+  display: flex;
+  align-items: center;
+  height: 24px;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.sl-apple-track {
+  flex: 1;
+  height: 8px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: #ffffff26;
+  transition:
+    height 0.25s cubic-bezier(0.3, 0.2, 0.2, 1.4),
+    border-radius 0.25s;
+}
+
+/* Under the finger the bar swells, as Apple Music's does. */
+.sl-apple-scrub.sl-seeking .sl-apple-track {
+  height: 16px;
+  border-radius: 8px;
+}
+
+.sl-apple-fill {
+  width: 100%;
+  height: 100%;
+  background: #fff;
+  opacity: 0.4;
+  transform: scaleX(0);
+  transform-origin: left center;
+}
+
+.sl-apple-times {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 4px;
+  height: 18px;
+  font-size: max(1.2vh, 0.8rem);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.5;
+}
+
+.sl-apple-buttons {
+  display: flex;
+  justify-content: space-evenly;
+  align-items: center;
+}
+
+.sl-apple-buttons button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--sl-apple-button);
+  height: var(--sl-apple-button);
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  color: inherit;
+  background: #fff0;
+  cursor: pointer;
+  transition:
+    background-color 0.3s,
+    transform 0.2s;
+}
+
+.sl-apple-buttons button:active {
+  background: #fff2;
+  transform: scale(0.85);
+}
+
+.sl-apple-buttons svg {
+  width: 72%;
+  height: 72%;
+}
+
+.sl-apple-buttons .sl-apple-play svg {
+  width: 44%;
+  height: 44%;
 }
 
 /* --- Settings → "Lignes interactives" off -----------------------------------

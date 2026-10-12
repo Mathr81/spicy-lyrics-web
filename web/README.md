@@ -96,8 +96,14 @@ Music's. It is off by default, and switching is live.
   The active line sits level with the centre of the cover.
 - **Background**: the animated mesh gradient of the cover, in place of the Spicy
   background (which is stopped meanwhile, not left rendering underneath).
+  Settings → **Fond Apple Music** turns just this off, for Apple Music's lyrics
+  over the Spicy background.
 - **Cover and titles**: the cover takes Apple Music's size and shadow and steps
   back when playback pauses; title and artist are set left under it.
+- **Phone layout**: a small cover with title and artist beside it, the lyrics
+  across the full width, and Apple Music's transport underneath — scrubber,
+  elapsed and remaining time, previous / play / next. A tap on the cover or the
+  title still opens the card with every other control.
 
 The rendering is [AMLL](https://github.com/amll-dev/applemusic-like-lyrics)'s
 `@applemusic-like-lyrics/core` (AGPL-3.0, like this project), loaded on demand so
@@ -109,9 +115,11 @@ AMLL's line model and drives it from the same playback clock.
 - The typeface is San Francisco where the system has it (iOS, iPadOS, macOS).
   Apple doesn't license it for the web, so elsewhere it is Inter, bundled and
   only downloaded when needed.
-- The playback controls stay the extension's, on the cover; Apple Music's
-  transport bar is not reproduced. The narrow (compact) layout keeps the
-  extension's header too.
+- In the side-by-side layout the playback controls stay the extension's, on
+  the cover; Apple Music's transport is only reproduced in the phone layout.
+- AMLL's mesh folds over itself as it flows, which now and then shows as a hard
+  curved edge sweeping across the screen. Apple Music's background has none, so
+  the canvas is rendered small, blurred and scaled up (`.sl-amll-bg`).
 - Unsynced lyrics have no timings to animate and stay on the Spicy renderer.
 - Romanization is shown under each word or line instead of replacing it.
 
