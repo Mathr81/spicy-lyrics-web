@@ -19,6 +19,7 @@ import "@fontsource-variable/inter/wght.css";
 import { PageContainer } from "../shim/PageView.ts";
 import { SpotifyPlayer, isPlaying } from "../shim/SpotifyPlayer.ts";
 import { KawarpMap } from "../shim/dynamicBackground.ts";
+import { isFloating } from "../native.ts";
 import { seekToLyricTime } from "../lineseek.ts";
 import { toLines } from "./amll-lines.ts";
 
@@ -165,6 +166,9 @@ export function setAppleBackground(cover: string | null): void {
     // Every call, not only the first: the Spicy background restarts itself on
     // each new cover.
     KawarpMap.forEach((spicy) => spicy.stop());
+    // Floating over another app it holds still, see apply.ts. AMLL's static
+    // mode still draws a new cover, then stops.
+    background.setStaticMode(isFloating());
     void background.setAlbum(cover).catch((err) => {
       console.warn("[SpicyLyrics] Apple Music background could not load the cover", err);
     });
