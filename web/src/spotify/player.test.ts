@@ -5,6 +5,13 @@ mock.module("../config.ts", () => ({ SDK_SUPPORTED: false }));
 mock.module("./auth.ts", () => ({ getAccessToken: async () => "token" }));
 mock.module("../shim/SpotifyPlayer.ts", () => ({ pushPlaybackState() {}, setPlaying() {} }));
 
+// The Android shell, which is only there in the last test.
+const shellCalls: string[] = [];
+(globalThis as any).SpicyNative = {
+  subscribe() {},
+  transport: (action: string) => shellCalls.push(action) > 0,
+};
+
 // What Spotify answers: GET /me/player, and the status of PUT /me/player/play.
 let playerState: object | null = null;
 let playStatus = 204;
@@ -30,7 +37,9 @@ let poll: () => Promise<void> = async () => {};
   return 0;
 };
 
-const { initPlayer, togglePlay, getSnapshot, onPlaybackError } = await import("./player.ts");
+const { initPlayer, togglePlay, play, queueTrack, getSnapshot, onPlaybackError } = await import(
+  "./player.ts"
+);
 
 const playingOn = (id: string) => ({
   is_playing: true,
@@ -75,4 +84,35 @@ test("a play Spotify refuses is reported and undone", async () => {
   expect(getSnapshot().isPlaying).toBe(false);
   expect(errors).toHaveLength(1);
   expect(errors[0]).toContain("iPad");
+});
+
+test("playing a search result and queueing one both name the device", async () => {
+  playStatus = 204;
+  await play("spotify:track:2");
+  await queueTrack("spotify:track:3");
+  expect(calls).toContain("PUT /me/player/play?device_id=d1");
+  expect(calls).toContain("POST /me/player/queue?uri=spotify%3Atrack%3A3&device_id=d1");
+});
+
+test("Android: the phone's media session is the clock and the transport", async () => {
+  playerState = playingOn("d1");
+  const session = (globalThis as any).__spicyNative;
+
+  // On another title it says nothing about this track: the Web API still rules.
+  session({ playing: false, positionMs: 5_000, title: "Autre" });
+  await poll();
+  expect(getSnapshot().isPlaying).toBe(true);
+  expect(shellCalls).toHaveLength(0);
+
+  session({ playing: false, positionMs: 90_000, title: "Joli" });
+  expect(getSnapshot().isPlaying).toBe(false);
+  expect(getSnapshot().positionMs).toBe(90_000);
+
+  await poll(); // Spotify's servers still say "playing at 0:30"
+  expect(getSnapshot().positionMs).toBe(90_000);
+
+  const before = calls.length;
+  await togglePlay();
+  expect(shellCalls).toEqual(["play"]);
+  expect(calls.length).toBe(before);
 });

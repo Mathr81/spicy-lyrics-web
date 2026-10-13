@@ -23,6 +23,8 @@ export interface SimpleTrack {
   name: string;
   artists: { name: string; uri: string; type: "artist" }[];
   cover: string | null;
+  /** The smallest cover, for lists. Only on tracks read from the Web API. */
+  thumb?: string | null;
   durationMs: number;
 }
 
@@ -43,6 +45,7 @@ function toSimpleTrack(item: any): SimpleTrack {
       type: "artist" as const,
     })),
     cover: coverFrom(item.album?.images),
+    thumb: item.album?.images?.at(-1)?.url ?? null,
     durationMs: item.duration_ms ?? 0,
   };
 }
@@ -92,18 +95,39 @@ export async function transferPlayback(deviceId: string, play = true): Promise<v
   });
 }
 
-export async function playTrack(uri: string, deviceId?: string): Promise<void> {
-  const q = deviceId ? `?device_id=${deviceId}` : "";
-  await req(`/me/player/play${q}`, {
+/** These commands throw when Spotify refuses, with the HTTP code as `status`. */
+async function command(path: string, init: RequestInit = { method: "PUT" }): Promise<void> {
+  const res = await req(path, init);
+  if (!res.ok) throw Object.assign(new Error(`Spotify ${res.status}`), { status: res.status });
+}
+
+// As for resume below, a command has to name the device once none is active.
+const onDevice = (deviceId: string | null | undefined, sep: "?" | "&") =>
+  deviceId ? `${sep}device_id=${deviceId}` : "";
+
+/** Play this track now, in place of whatever was playing. */
+export async function playTrack(uri: string, deviceId?: string | null): Promise<void> {
+  await command(`/me/player/play${onDevice(deviceId, "?")}`, {
     method: "PUT",
     body: JSON.stringify({ uris: [uri] }),
   });
 }
 
-/** Play and pause throw when Spotify refuses, with the HTTP code as `status`. */
-async function command(path: string): Promise<void> {
-  const res = await req(path, { method: "PUT" });
-  if (!res.ok) throw Object.assign(new Error(`Spotify ${res.status}`), { status: res.status });
+export async function addToQueue(uri: string, deviceId?: string | null): Promise<void> {
+  await command(`/me/player/queue?uri=${encodeURIComponent(uri)}${onDevice(deviceId, "&")}`, {
+    method: "POST",
+  });
+}
+
+/**
+ * GET /me/player/queue — what plays next. Read-only: the Web API can neither
+ * reorder the queue nor jump to an entry.
+ */
+export async function getQueue(): Promise<SimpleTrack[]> {
+  const res = await req("/me/player/queue");
+  if (!res.ok) throw new Error(`Queue failed: ${res.status}`);
+  const json = await res.json();
+  return (json.queue ?? []).filter((item: any) => item?.type === "track").map(toSimpleTrack);
 }
 
 export async function pause(): Promise<void> {
@@ -115,7 +139,7 @@ export async function pause(): Promise<void> {
  * device as active, and a bare play is then answered 404 "no active device".
  */
 export async function resume(deviceId?: string | null): Promise<void> {
-  await command(`/me/player/play${deviceId ? `?device_id=${deviceId}` : ""}`);
+  await command(`/me/player/play${onDevice(deviceId, "?")}`);
 }
 
 export async function seek(positionMs: number): Promise<void> {

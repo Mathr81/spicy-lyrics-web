@@ -2,15 +2,27 @@ package io.github.mathr81.spicylyrics;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.NotificationManager;
 import android.app.PendingIntent;
+import android.app.PictureInPictureParams;
 import android.content.ActivityNotFoundException;
+import android.content.ComponentName;
 import android.content.Intent;
 import android.content.pm.PackageInstaller;
+import android.content.res.Configuration;
 import android.graphics.Color;
+import android.media.MediaMetadata;
+import android.media.session.MediaController;
+import android.media.session.MediaSessionManager;
+import android.media.session.PlaybackState;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.SystemClock;
+import android.provider.Settings;
 import android.util.Log;
+import android.util.Rational;
+import android.view.HapticFeedbackConstants;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
@@ -24,21 +36,29 @@ import org.json.JSONObject;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URL;
+import java.util.List;
 import java.util.Scanner;
 
 /**
  * The whole app: the hosted web page in a WebView drawn under the system bars,
- * and a self-updater.
+ * plus what a page cannot do by itself — float over other apps, read Spotify's
+ * playback on this phone, hold the screen on, update the app.
  *
  * The page is loaded from the web deploy, so everything in it updates by itself.
  * Only this shell needs a new APK; CI publishes each build as the GitHub release
  * "android-v<versionCode>", and that is where the updater looks.
+ *
+ * The page reaches this class as `window.SpicyNative` (the @JavascriptInterface
+ * methods; web/src/native.ts is their other half). Those run on a WebView
+ * thread, hence the runOnUiThread in each.
  */
 public class MainActivity extends Activity {
     private static final String TAG = "SpicyLyrics";
     private static final String RELEASE_TAG_PREFIX = "android-v";
+    private static final String SPOTIFY = "com.spotify.music";
 
     private WebView web;
+    private boolean playing;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -46,6 +66,9 @@ public class MainActivity extends Activity {
         // Edge to edge: the page gets the full window and keeps its own content
         // clear of the bars with env(safe-area-inset-*).
         getWindow().setDecorFitsSystemWindows(false);
+        // Lyrics are for reading with the phone put down: still there after the
+        // screen was locked, without unlocking.
+        setShowWhenLocked(true);
 
         web = new WebView(this);
         web.setBackgroundColor(Color.BLACK);
@@ -78,13 +101,209 @@ public class MainActivity extends Activity {
         checkForUpdate();
     }
 
-    /**
-     * Called by the page (web/src/wakelock.ts) while something is playing: a
-     * WebView has no Screen Wake Lock API of its own.
-     */
+    @Override
+    protected void onResume() {
+        super.onResume();
+        linkSpotify(); // the user may be back from granting the access
+    }
+
+    @Override
+    protected void onDestroy() {
+        unlinkSpotify();
+        super.onDestroy();
+    }
+
+    private void tellPage(String function, String argument) {
+        web.evaluateJavascript("window." + function + "&&window." + function + "(" + argument + ")", null);
+    }
+
+    /** A WebView has no Screen Wake Lock API: the page asks for the screen here. */
     @JavascriptInterface
     public void keepAwake(boolean on) {
         runOnUiThread(() -> web.setKeepScreenOn(on));
+    }
+
+    @JavascriptInterface
+    public void haptic() {
+        runOnUiThread(() -> web.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK));
+    }
+
+    // --- Floating over other apps (picture-in-picture) ----------------------
+    // Leaving the app while a song plays shrinks it to a window that stays on
+    // top, so the lyrics are still there in Spotify. Paused, it just leaves.
+
+    @JavascriptInterface
+    public void setPlaying(boolean on) {
+        runOnUiThread(() -> {
+            playing = on;
+            setPictureInPictureParams(pipParams());
+        });
+    }
+
+    private PictureInPictureParams pipParams() {
+        PictureInPictureParams.Builder params =
+                new PictureInPictureParams.Builder().setAspectRatio(new Rational(4, 3));
+        // Android 12+ shrinks the app by itself on the way home, gesture included.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) params.setAutoEnterEnabled(playing);
+        return params.build();
+    }
+
+    @Override
+    protected void onUserLeaveHint() {
+        super.onUserLeaveHint();
+        if (playing && Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            enterPictureInPictureMode(pipParams());
+        }
+    }
+
+    @Override
+    public void onPictureInPictureModeChanged(boolean floating, Configuration newConfig) {
+        super.onPictureInPictureModeChanged(floating, newConfig);
+        tellPage("__spicyPip", String.valueOf(floating)); // the page's small layout
+    }
+
+    // --- Spotify's media session --------------------------------------------
+    // What Spotify is doing on this phone, read from the system the moment it
+    // changes, instead of from Spotify's servers once a second. Android only
+    // shows other apps' sessions to a notification listener the user has
+    // enabled: MediaLink is that listener, and reads no notification.
+
+    private volatile MediaController spotify;
+    private boolean watchingSessions;
+
+    private final MediaSessionManager.OnActiveSessionsChangedListener sessionsChanged = this::attach;
+
+    private final MediaController.Callback sessionChanged = new MediaController.Callback() {
+        @Override
+        public void onPlaybackStateChanged(PlaybackState state) {
+            reportSession();
+        }
+
+        @Override
+        public void onMetadataChanged(MediaMetadata metadata) {
+            reportSession();
+        }
+
+        @Override
+        public void onSessionDestroyed() {
+            attach(null);
+        }
+    };
+
+    private ComponentName mediaLink() {
+        return new ComponentName(this, MediaLink.class);
+    }
+
+    @JavascriptInterface
+    public boolean linkGranted() {
+        return getSystemService(NotificationManager.class).isNotificationListenerAccessGranted(mediaLink());
+    }
+
+    @JavascriptInterface
+    public void requestLink() {
+        runOnUiThread(() -> {
+            try {
+                startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS)
+                        .putExtra(Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME, mediaLink().flattenToString()));
+            } catch (ActivityNotFoundException e) {
+                startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS));
+            }
+        });
+    }
+
+    /** The page is ready to hear about the session (again, after a reload). */
+    @JavascriptInterface
+    public void subscribe() {
+        runOnUiThread(this::linkSpotify);
+    }
+
+    private void linkSpotify() {
+        if (!linkGranted()) {
+            unlinkSpotify();
+            return;
+        }
+        try {
+            MediaSessionManager sessions = getSystemService(MediaSessionManager.class);
+            if (!watchingSessions) {
+                sessions.addOnActiveSessionsChangedListener(sessionsChanged, mediaLink());
+                watchingSessions = true;
+            }
+            attach(sessions.getActiveSessions(mediaLink()));
+        } catch (SecurityException e) {
+            Log.w(TAG, "media sessions unavailable", e);
+            unlinkSpotify();
+        }
+    }
+
+    private void unlinkSpotify() {
+        if (watchingSessions) {
+            getSystemService(MediaSessionManager.class).removeOnActiveSessionsChangedListener(sessionsChanged);
+            watchingSessions = false;
+        }
+        attach(null);
+    }
+
+    private void attach(List<MediaController> sessions) {
+        MediaController found = null;
+        if (sessions != null) {
+            for (MediaController session : sessions) {
+                if (SPOTIFY.equals(session.getPackageName())) {
+                    found = session;
+                    break;
+                }
+            }
+        }
+        MediaController current = spotify;
+        boolean same = found != null && current != null
+                && found.getSessionToken().equals(current.getSessionToken());
+        if (!same) {
+            if (current != null) current.unregisterCallback(sessionChanged);
+            if (found != null) found.registerCallback(sessionChanged);
+            spotify = found;
+        }
+        reportSession();
+    }
+
+    /** To the page: null without a session, else where the session is right now. */
+    private void reportSession() {
+        MediaController session = spotify;
+        PlaybackState state = session == null ? null : session.getPlaybackState();
+        MediaMetadata metadata = session == null ? null : session.getMetadata();
+        String report = "null";
+        if (state != null && metadata != null) {
+            boolean isPlaying = state.getState() == PlaybackState.STATE_PLAYING;
+            long position = state.getPosition();
+            if (isPlaying) {
+                position += (long) ((SystemClock.elapsedRealtime() - state.getLastPositionUpdateTime())
+                        * state.getPlaybackSpeed());
+            }
+            try {
+                report = new JSONObject()
+                        .put("playing", isPlaying)
+                        .put("positionMs", position)
+                        .put("title", metadata.getString(MediaMetadata.METADATA_KEY_TITLE))
+                        .toString();
+            } catch (Exception e) {
+                Log.w(TAG, "session report failed", e);
+            }
+        }
+        tellPage("__spicyNative", report);
+    }
+
+    @JavascriptInterface
+    public boolean transport(String action, double positionMs) {
+        MediaController session = spotify;
+        if (session == null) return false;
+        MediaController.TransportControls controls = session.getTransportControls();
+        switch (action) {
+            case "play": controls.play(); break;
+            case "pause": controls.pause(); break;
+            case "next": controls.skipToNext(); break;
+            case "prev": controls.skipToPrevious(); break;
+            case "seek": controls.seekTo((long) positionMs); break;
+            default: return false;
+        }
+        return true;
     }
 
     // --- Self-update -------------------------------------------------------

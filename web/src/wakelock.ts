@@ -16,6 +16,8 @@
 //    the desired state is tracked separately from the actual lock and
 //    reconciled whenever either changes.
 
+import { shell } from "./native.ts";
+
 const STORE_KEY = "sl_wakelock_enabled_v1";
 
 type Sentinel = { released: boolean; release: () => Promise<void> } & EventTarget;
@@ -26,12 +28,9 @@ let enabled = readEnabled(); // user preference
 let acquiring = false;
 let listening = false;
 
-// The Android app (android/): its WebView has no Wake Lock API, so the shell
-// around it holds the screen instead.
-const shell = (window as any).SpicyNative as { keepAwake(on: boolean): void } | undefined;
-
 export function wakeLockSupported(): boolean {
-  return "wakeLock" in navigator || !!shell;
+  // The Android app's WebView has no Wake Lock API; its shell holds the screen.
+  return "wakeLock" in navigator || !!shell?.keepAwake;
 }
 
 function readEnabled(): boolean {
@@ -97,7 +96,7 @@ async function release(): Promise<void> {
 
 async function reconcile(): Promise<void> {
   if (!wakeLockSupported()) return;
-  if (shell) return shell.keepAwake(enabled && wantLock);
+  if (shell?.keepAwake) return shell.keepAwake(enabled && wantLock);
   if (enabled && wantLock) await acquire();
   else await release();
 }

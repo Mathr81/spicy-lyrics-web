@@ -11,11 +11,12 @@
         android:icon="@mipmap/icon"
         android:label="Spicy Lyrics"
         android:theme="@style/App">
-        <!-- configChanges: a rotation must not rebuild the activity, which would
-             reload the page mid-song. singleTop: install results arrive in
-             onNewIntent. -->
+        <!-- configChanges: neither a rotation nor shrinking to picture-in-picture
+             may rebuild the activity, which would reload the page mid-song.
+             singleTop: install results arrive in onNewIntent. -->
         <activity
             android:name=".MainActivity"
+            android:supportsPictureInPicture="true"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density"
             android:exported="true"
             android:launchMode="singleTop">
@@ -24,5 +25,17 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- See MediaLink.java: the permission Android asks of whoever reads
+             another app's media session. -->
+        <service
+            android:name=".MediaLink"
+            android:exported="true"
+            android:label="Spicy Lyrics"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>

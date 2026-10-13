@@ -1367,3 +1367,165 @@ html.sl-ios-standalone .sl-status {
 #SpicyLyricsPage.sl-no-line-interaction .LyricsContainer .sl-amll > * {
   pointer-events: none !important;
 }
+
+/* --- Music panel (music.ts): the queue, and a search ------------------------
+   Inside the settings overlay's card. */
+.sl-music .sl-settings-card {
+  height: min(640px, 100%);
+}
+
+.sl-music-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sl-music-head a {
+  text-decoration: none;
+}
+
+.sl-music-search {
+  appearance: none;
+  width: 100%;
+  padding: 12px 16px;
+  font: inherit;
+  /* 16px: below that, iOS zooms the page in on focus. */
+  font-size: 16px;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid transparent;
+  border-radius: 12px;
+  outline: none;
+}
+
+.sl-music-search:focus-visible {
+  border-color: rgba(255, 255, 255, 0.4);
+}
+
+.sl-music-search::placeholder {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.sl-music-label {
+  margin-top: 10px;
+  min-height: 1.4em;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.sl-music-list {
+  flex: 1;
+  min-height: 120px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.sl-music-row,
+.sl-music-play {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.sl-music-row {
+  padding: 6px 0;
+}
+
+.sl-music-play {
+  flex: 1;
+  appearance: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.sl-music-play:active {
+  opacity: 0.6;
+}
+
+.sl-music-cover {
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.sl-music-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.sl-music-name,
+.sl-music-artists {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.sl-music-name {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.sl-music-artists {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.sl-music-add {
+  flex-shrink: 0;
+  appearance: none;
+  width: 44px;
+  height: 44px;
+  font-size: 22px;
+  line-height: 1;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.sl-music-add:disabled {
+  color: #1db954;
+  cursor: default;
+}
+
+/* --- Android app: floating over another app (picture-in-picture) -------------
+   `sl-native-pip` is set by the app's shell (native.ts). The window is some
+   250px wide and Android hands it no touch but its own, so it shows the lyrics
+   and nothing to press. */
+html.sl-native-pip #SpicyLyricsPage .ContentBox .NowBar,
+html.sl-native-pip .sl-apple-transport,
+html.sl-native-pip .sl-status,
+html.sl-native-pip .sl-sync,
+html.sl-native-pip .sl-sync-toast,
+html.sl-native-pip .sl-settings-overlay {
+  display: none !important;
+}
+
+html.sl-native-pip #SpicyLyricsPage {
+  --DefaultLyricsSize: 9vw !important;
+  --LyricsLeftSidePadding: 5vw !important;
+  --LyricsRightSidePadding: 5vw !important;
+}
+
+html.sl-native-pip #SpicyLyricsRoot > #SpicyLyricsPage.CompactMode .ContentBox .LyricsContainer {
+  margin-top: 0 !important;
+  padding-bottom: 0 !important;
+}
+
+html.sl-native-pip #SpicyLyricsPage .LyricsContainer .sl-amll {
+  font-size: 9vw !important;
+}

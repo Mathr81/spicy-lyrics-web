@@ -53,6 +53,8 @@ import { initSystemBars } from "./systembars.ts";
 import { initWakeLock, setPlaying as setWakeLockPlaying } from "./wakelock.ts";
 import { setupSettings, type SettingsHandle } from "./settings.ts";
 import { setupSync } from "./sync.ts";
+import { setupMusic } from "./music.ts";
+import { initNative, setNativePlaying } from "./native.ts";
 import { $romanization } from "@src/utils/uiState.ts";
 import LoadFonts, { ApplyFontPixel } from "@src/components/Styling/Fonts.ts";
 import Fullscreen from "./shim/Fullscreen.ts";
@@ -96,7 +98,9 @@ async function main(): Promise<void> {
 
   shell = renderShell(root, { onLogin: () => void login() });
 
+  initNative();
   const sync = setupSync(root);
+  const music = setupMusic();
   settings = setupSettings({
     getPage: () => page,
     openSync: () => sync.open(),
@@ -129,6 +133,7 @@ async function main(): Promise<void> {
     onToggleCompact: () => toggleCompactMode(),
     onOpenSettings: () => settings.open(),
     onOpenSync: () => sync.toggle(),
+    onOpenMusic: () => music.open(),
   });
 
   // Narrow viewports start in compact mode automatically — reflect that in the
@@ -182,6 +187,7 @@ async function main(): Promise<void> {
 function handleSnapshot(snap: AdapterSnapshot): void {
   updateNowBar(snap.track);
   setWakeLockPlaying(snap.isPlaying);
+  setNativePlaying(snap.isPlaying);
   setPaused(!snap.isPlaying);
 
   const hasTrack = !!snap.track;

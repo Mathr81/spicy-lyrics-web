@@ -17,6 +17,7 @@ import {
 } from "./wakelock.ts";
 import { $appleLyrics, $appleBackground } from "./lyrics/apply.ts";
 import { $lineInteraction } from "./lineseek.ts";
+import { shell } from "./native.ts";
 
 export interface SettingsCallbacks {
   getPage: () => HTMLElement | null;
@@ -124,7 +125,22 @@ export function setupSettings(cb: SettingsCallbacks): SettingsHandle {
     });
   }
 
+  // Android app only. Not a preference of ours but a system permission: the
+  // switch shows whether it is granted, and either way opens the system screen
+  // where the user changes it.
+  if (shell?.linkGranted) {
+    toggles.push({
+      label: "Lien direct avec Spotify",
+      desc: "Lit la lecture en cours sur ce téléphone : synchro et boutons instantanés. Android appelle ça l'« accès aux notifications » ; l'app n'en lit aucune.",
+      get: () => !!shell.linkGranted?.(),
+      set: () => shell.requestLink?.(),
+    });
+  }
+
   let overlay: HTMLElement | null = null;
+  // Switches whose state can change behind the panel's back (the one above).
+  const resync: (() => void)[] = [];
+  document.addEventListener("visibilitychange", () => resync.forEach((sync) => sync()));
 
   function buildRow(def: ToggleDef): HTMLElement {
     const row = document.createElement("label");
@@ -144,6 +160,7 @@ export function setupSettings(cb: SettingsCallbacks): SettingsHandle {
       sw.setAttribute("aria-checked", String(on));
     };
     sync();
+    resync.push(sync);
     row.addEventListener("click", (e) => {
       e.preventDefault();
       def.set(!def.get());

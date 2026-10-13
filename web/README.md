@@ -86,6 +86,14 @@ Then push to `main` (or run the workflow manually) and it deploys itself.
 Append `?demo` to the URL to preview the animated lyrics with a built-in sample —
 no Spotify login required. Handy for checking your deployment.
 
+## Queue and search
+
+The cover's controls have a **music panel** (`web/src/music.ts`): what plays
+next, and a search — tap a result to play it, **+** to queue it — so choosing
+music no longer means leaving for Spotify, plus a link to the current track in
+Spotify. The queue is read-only: the Web API can neither reorder it nor jump to
+an entry.
+
 ## Apple Music view
 
 Settings → **Affichage Apple Music** swaps the Spicy Lyrics look for Apple
@@ -168,8 +176,24 @@ sight. To have the bars *and* the background under them, use the Android app.
 `android/` is a small native shell: the hosted page in a WebView drawn edge to
 edge, under transparent system bars and into the camera cutout. It loads the
 page from your web deploy, so the lyrics side updates with every deploy and
-needs no new APK. The shell also keeps the screen on while something plays (a
-WebView has no Wake Lock API) and opens outside links in the browser.
+needs no new APK. Around the page, the shell (`MainActivity.java`, reached from
+the page as `window.SpicyNative`, see `web/src/native.ts`) adds what a page
+cannot do:
+
+- **Floating lyrics.** Leave the app while a song plays and it shrinks to a
+  picture-in-picture window that stays on top — over Spotify, for instance —
+  showing only the lyrics. Paused, the app just leaves.
+- **Direct link with Spotify** (Settings → *Lien direct avec Spotify*). The app
+  reads Spotify's media session on the phone: play state and position arrive
+  the moment they change instead of once a second from Spotify's servers, and
+  play / pause / skip / seek act on the session directly. The Web API is still
+  what says *which* track is playing. Android grants this through "notification
+  access"; the app's listener (`MediaLink.java`) is empty and reads none. On
+  Android 13+, an app installed from a downloaded APK has that switch greyed
+  out until you open the app's info page → ⋮ → *Allow restricted settings*.
+- The screen stays on while something plays (a WebView has no Wake Lock API),
+  and the lyrics stay up over the lock screen.
+- Haptic feedback on the controls; outside links open in the browser.
 
 `.github/workflows/android.yml` builds it on every push to `main` that touches
 `android/`, and publishes the APK as the release `android-v<run number>`.
