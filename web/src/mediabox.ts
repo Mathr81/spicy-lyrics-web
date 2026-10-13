@@ -30,6 +30,9 @@ export function fmt(ms: number): string {
 // A monitor glyph for the "play in this browser" (SDK opt-in) control.
 const DEVICE_ICON = `<svg class="NoFill" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>`;
 
+// A list with a note: the queue and the search (music.ts).
+const MUSIC_ICON = `<svg class="NoFill" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h12"/><path d="M3 12h8"/><path d="M3 18h6"/><path d="M17 18V8l4-1"/><circle cx="15" cy="18" r="2"/></svg>`;
+
 // A stopwatch: the lyric sync offset.
 const SYNC_ICON = `<svg class="NoFill" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="14" r="8"/><path d="M12 10v4l2.5 2.5"/><path d="M10 2h4"/><path d="M12 2v4"/></svg>`;
 
@@ -42,6 +45,7 @@ export interface MediaBoxCallbacks {
   onToggleCompact: () => boolean;
   onOpenSettings: () => void;
   onOpenSync: () => void;
+  onOpenMusic: () => void;
 }
 
 export interface MediaBoxHandle {
@@ -84,6 +88,7 @@ export function setupMediaBoxControls(
       ${sdkSupported ? `<button class="ViewControl ListenHere" title="Écouter dans cet onglet">${DEVICE_ICON}</button>` : ""}
       ${pipSupported() || videoPipSupported() ? `<button class="ViewControl PipToggle" title="Picture-in-Picture">${Icons.PiPMode}</button>` : ""}
       ${fullscreenSupported ? `<button class="ViewControl FullscreenToggle" title="Plein écran">${Icons.Fullscreen}</button>` : ""}
+      <button class="ViewControl MusicToggle" title="File d'attente et recherche">${MUSIC_ICON}</button>
       <button class="ViewControl SyncToggle" title="Synchro des paroles">${SYNC_ICON}</button>
       <button class="ViewControl SettingsToggle" title="Réglages">${Icons.Settings}</button>
     </div>
@@ -115,6 +120,7 @@ export function setupMediaBoxControls(
   swapBtn?.addEventListener("click", cb.onSwapSides);
   settingsBtn?.addEventListener("click", cb.onOpenSettings);
   mediaContent.querySelector<HTMLElement>(".SyncToggle")?.addEventListener("click", cb.onOpenSync);
+  mediaContent.querySelector<HTMLElement>(".MusicToggle")?.addEventListener("click", cb.onOpenMusic);
   const setCompactIcon = (active: boolean) => {
     if (compactBtn)
       compactBtn.innerHTML = active

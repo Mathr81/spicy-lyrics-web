@@ -20,10 +20,12 @@ import {
   previous as apiPrevious,
   setShuffle as apiSetShuffle,
   setRepeat as apiSetRepeat,
+  addToQueue as apiAddToQueue,
   type SimpleTrack,
   type RepeatMode,
 } from "./api.ts";
 import { pushPlaybackState, setPlaying } from "../shim/SpotifyPlayer.ts";
+import { shell, type NativeSession } from "../native.ts";
 
 export type PlaybackMode = "sdk" | "connect";
 
@@ -249,47 +251,94 @@ async function initSdk(): Promise<boolean> {
 // ---------------------------------------------------------------------------
 // Spotify Connect mirror (polling)
 // ---------------------------------------------------------------------------
-function startConnectPolling(): void {
-  const poll = async () => {
-    try {
-      const startedAt = performance.now();
-      const snap = await getPlaybackState();
-      if (snap?.deviceId) lastDeviceId = snap.deviceId;
-      if (performance.now() < intentUntil && (snap?.isPlaying ?? false) !== last.isPlaying) return;
-      if (snap) {
-        emit(
-          {
-            track: snap.track,
-            isPlaying: snap.isPlaying,
-            positionMs: snap.progressMs,
-            deviceName: snap.deviceName,
-            mode: "connect",
-            shuffle: snap.shuffle,
-            repeat: snap.repeat,
-          },
-          sampleMidpoint(startedAt)
-        );
-      } else if (last.track) {
-        // No active device: Spotify drops it a while after a pause. The track
-        // stays up, paused where it was, rather than the page going blank.
-        if (last.isPlaying) emit({ ...last, isPlaying: false });
-      } else {
-        emit({
-          track: null,
-          isPlaying: false,
-          positionMs: 0,
-          deviceName: null,
-          mode: "connect",
-          shuffle: false,
-          repeat: "off",
-        });
-      }
-    } catch (err) {
-      console.warn("[SpicyLyrics] playback poll failed", err);
+async function pollMirror(): Promise<void> {
+  try {
+    const startedAt = performance.now();
+    const snap = await getPlaybackState();
+    if (snap?.deviceId) lastDeviceId = snap.deviceId;
+    const clock = snap && sessionClock(snap.track);
+    if (
+      !clock &&
+      performance.now() < intentUntil &&
+      (snap?.isPlaying ?? false) !== last.isPlaying
+    ) {
+      return;
     }
+    if (snap) {
+      emit(
+        {
+          track: snap.track,
+          isPlaying: snap.isPlaying,
+          positionMs: snap.progressMs,
+          deviceName: snap.deviceName,
+          mode: "connect",
+          shuffle: snap.shuffle,
+          repeat: snap.repeat,
+          ...clock,
+        },
+        clock ? undefined : sampleMidpoint(startedAt)
+      );
+    } else if (last.track) {
+      // No active device: Spotify drops it a while after a pause. The track
+      // stays up, paused where it was, rather than the page going blank.
+      if (last.isPlaying) emit({ ...last, isPlaying: false });
+    } else {
+      emit({
+        track: null,
+        isPlaying: false,
+        positionMs: 0,
+        deviceName: null,
+        mode: "connect",
+        shuffle: false,
+        repeat: "off",
+      });
+    }
+  } catch (err) {
+    console.warn("[SpicyLyrics] playback poll failed", err);
+  }
+}
+
+function startConnectPolling(): void {
+  void pollMirror();
+  connectTimer = window.setInterval(pollMirror, 1000);
+  linkNativeSession();
+}
+
+// ---------------------------------------------------------------------------
+// Android app: Spotify's own media session, on the same phone
+// ---------------------------------------------------------------------------
+// The shell (native.ts) reports the session the moment it changes, where the
+// Web API is a network round trip a second: so the session is the clock and the
+// transport, and the polling above is only still needed to say WHICH track is
+// playing — the session has a title, not a Spotify id.
+let session: (NativeSession & { at: number }) | null = null;
+
+/** Play state and position from the session, when it is on `track`. */
+function sessionClock(
+  track: SimpleTrack | null
+): Pick<AdapterSnapshot, "isPlaying" | "positionMs"> | null {
+  if (!session || session.title !== track?.name) return null;
+  const elapsed = session.playing ? performance.now() - session.at : 0;
+  return { isPlaying: session.playing, positionMs: session.positionMs + elapsed };
+}
+
+function linkNativeSession(): void {
+  (window as any).__spicyNative = (next: NativeSession | null) => {
+    session = next && { ...next, at: performance.now() };
+    const clock = sessionClock(last.track);
+    if (clock) emit({ ...last, ...clock });
+    // Another title: ask the Web API which track that is, now.
+    else if (session) void pollMirror();
   };
-  void poll();
-  connectTimer = window.setInterval(poll, 1000);
+  shell?.subscribe?.();
+}
+
+/** Through the session when there is one; false sends the caller to the Web API. */
+function sessionTransport(
+  action: "play" | "pause" | "next" | "prev" | "seek",
+  positionMs = 0
+): boolean {
+  return !!session && !!shell?.transport?.(action, positionMs);
 }
 
 // ---------------------------------------------------------------------------
@@ -324,12 +373,16 @@ export async function initPlayer(preferSdk: boolean): Promise<PlaybackMode> {
   return mode;
 }
 
+const targetDevice = () => (mode === "sdk" ? sdkDeviceId : lastDeviceId);
+
+/** Play this track now. Throws when Spotify refuses. */
 export async function play(uri: string): Promise<void> {
-  if (mode === "sdk" && sdkDeviceId) {
-    await apiPlayTrack(uri, sdkDeviceId);
-  } else {
-    await apiPlayTrack(uri);
-  }
+  await apiPlayTrack(uri, targetDevice());
+}
+
+/** Add this track to the queue. Throws when Spotify refuses. */
+export async function queueTrack(uri: string): Promise<void> {
+  await apiAddToQueue(uri, targetDevice());
 }
 
 export async function togglePlay(): Promise<void> {
@@ -342,6 +395,7 @@ export async function togglePlay(): Promise<void> {
 
 /** Connect mirror: play or pause the remote device. */
 async function setMirrorPlaying(playing: boolean): Promise<void> {
+  if (sessionTransport(playing ? "play" : "pause")) return;
   const show = (v: boolean) => {
     setPlaying(v); // keeps the lyric clock where it is, unlike emit()
     last = { ...last, isPlaying: v };
@@ -368,7 +422,7 @@ async function setMirrorPlaying(playing: boolean): Promise<void> {
 export async function seekTo(positionMs: number): Promise<void> {
   if (mode === "sdk" && sdkPlayer) {
     await sdkPlayer.seek(positionMs);
-  } else {
+  } else if (!sessionTransport("seek", positionMs)) {
     await apiSeek(positionMs);
   }
   // Optimistic re-anchor for instant lyric response.
@@ -377,12 +431,12 @@ export async function seekTo(positionMs: number): Promise<void> {
 
 export async function skipNext(): Promise<void> {
   if (mode === "sdk" && sdkPlayer) await sdkPlayer.nextTrack();
-  else await apiNext();
+  else if (!sessionTransport("next")) await apiNext();
 }
 
 export async function skipPrev(): Promise<void> {
   if (mode === "sdk" && sdkPlayer) await sdkPlayer.previousTrack();
-  else await apiPrevious();
+  else if (!sessionTransport("prev")) await apiPrevious();
 }
 
 /**
