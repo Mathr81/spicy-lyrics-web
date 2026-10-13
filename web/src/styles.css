@@ -66,12 +66,10 @@ body {
    against that too-short viewport. Growing them by exactly the deficit puts the
    bottom edge back on the bottom of the screen.
 
-   `--sl-viewport-gap` is measured at runtime (see viewport.ts:
-   screen height − innerHeight, which in standalone mode IS the missing strip);
-   `env(safe-area-inset-top)` is the fallback for the first paint and for the
-   cases the measurement refuses. Scoped to `.sl-ios-standalone`, which only
-   viewport.ts sets — in Safari tabs and on every other platform nothing below
-   applies. */
+   The deficit is `env(safe-area-inset-top)`. `--sl-viewport-gap` overrides it
+   with 0 while the page is in a window (Split View…), where nothing is missing
+   — see viewport.ts. Scoped to `.sl-ios-standalone`, which only viewport.ts
+   sets — in Safari tabs and on every other platform nothing below applies. */
 /* Only the root: `body`'s own `height: 100%` then resolves against this, so the
    deficit is added once, not twice. */
 html.sl-ios-standalone {

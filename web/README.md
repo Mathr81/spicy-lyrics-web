@@ -151,11 +151,11 @@ That combination has a well-known iOS side effect: the web view is drawn from th
 physical top of the screen, but the *layout viewport* keeps the height it would
 have had underneath the status bar. The document ends up shifted up, and the
 strip it no longer covers at the bottom shows the manifest `background_color` —
-the black bar. `web/src/viewport.ts` measures that deficit at runtime
-(`screen height − innerHeight`, which in standalone mode is exactly the missing
-strip) and `styles.css` grows the fixed page host by it, so the page reaches the
-real bottom edge again. Scoped to installed iOS/iPadOS apps; nothing changes in a
-Safari tab or on any other platform.
+the black bar. `styles.css` grows the fixed page host by that inset, so the page
+reaches the real bottom edge again. A window that is not the whole screen (Split
+View, Slide Over, Stage Manager) has nothing missing, so `web/src/viewport.ts`
+turns the correction off there. Scoped to installed iOS/iPadOS apps; nothing
+changes in a Safari tab or on any other platform.
 
 ### Android: the system bars
 
