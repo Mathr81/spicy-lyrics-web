@@ -27,6 +27,7 @@ import {
   onUpdate,
   enableSdkPlayback,
   getSnapshot,
+  onPlaybackError,
   type AdapterSnapshot,
 } from "./spotify/player.ts";
 import { SpotifyPlayer } from "./shim/SpotifyPlayer.ts";
@@ -175,6 +176,7 @@ async function main(): Promise<void> {
   // opt-in via the cover's "listen here" control — never grabbed on load.
   await initPlayer(false);
   onUpdate(handleSnapshot);
+  onPlaybackError((message) => shell.setStatus(message));
 }
 
 function handleSnapshot(snap: AdapterSnapshot): void {
@@ -244,6 +246,7 @@ function startDebug(): void {
       `playing:  ${s.isPlaying}   pos: ${(pos / 1000).toFixed(1)}s / ${(dur / 1000).toFixed(1)}s`,
       `track:    ${s.track?.name ?? "—"}`,
       `lyrics:   type=${lastLyricsInfo.type}  source=${lastLyricsInfo.source}  lines=${lastLyricsInfo.lines}  translit=${lastLyricsInfo.translit}`,
+      `viewport: inner=${window.innerHeight}  screen=${window.screen.width}x${window.screen.height}  gap=${document.documentElement.style.getPropertyValue("--sl-viewport-gap") || "—"}`,
     ].join("\n");
   }, 300);
 }

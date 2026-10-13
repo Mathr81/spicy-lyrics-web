@@ -37,23 +37,49 @@ function isStandalone(): boolean {
   );
 }
 
-// The screen's height in CSS pixels for the CURRENT orientation. iOS is
-// inconsistent about whether `screen.width`/`screen.height` swap on rotation,
-// so derive it from the orientation instead of reading `screen.height` blindly.
-function screenHeight(): number {
-  const landscape = window.matchMedia("(orientation: landscape)").matches;
-  const a = window.screen.width;
-  const b = window.screen.height;
-  return landscape ? Math.min(a, b) : Math.max(a, b);
+// Which way the DEVICE is held. Not the `(orientation: landscape)` media query:
+// that one describes the viewport, and a Split View pane on a landscape iPad is
+// taller than it is wide.
+function deviceIsLandscape(): boolean {
+  const type = window.screen.orientation?.type;
+  if (type) return type.startsWith("landscape");
+  const angle = (window as any).orientation;
+  if (typeof angle === "number") return Math.abs(angle) === 90;
+  return window.matchMedia("(orientation: landscape)").matches;
+}
+
+/**
+ * The strip missing under the page, in px, or null when it can't be told. iOS is
+ * inconsistent about whether `screen.width`/`screen.height` swap on rotation, so
+ * the screen's height comes from the orientation.
+ *
+ * 0 is an answer, not a failed measurement: a Split View pane has nothing
+ * missing, and growing it by the `env()` fallback pushed the bottom of the page
+ * (the Apple Music transport) off the screen.
+ */
+export function viewportGap(
+  screenA: number,
+  screenB: number,
+  landscape: boolean,
+  innerHeight: number
+): number | null {
+  const screenHeight = landscape ? Math.min(screenA, screenB) : Math.max(screenA, screenB);
+  const gap = Math.round(screenHeight - innerHeight);
+  return gap >= 0 && gap <= MAX_PLAUSIBLE_GAP_PX ? gap : null;
 }
 
 function measure(): void {
-  const gap = Math.round(screenHeight() - window.innerHeight);
+  const gap = viewportGap(
+    window.screen.width,
+    window.screen.height,
+    deviceIsLandscape(),
+    window.innerHeight
+  );
   const root = document.documentElement;
-  if (gap > 0 && gap <= MAX_PLAUSIBLE_GAP_PX) {
+  if (gap !== null) {
     root.style.setProperty("--sl-viewport-gap", `${gap}px`);
   } else {
-    // Implausible (rotation mid-measure, Stage Manager window, split view):
+    // Implausible (rotation mid-measure, a window shorter than the screen):
     // drop back to the CSS `env()` fallback rather than inventing a number.
     root.style.removeProperty("--sl-viewport-gap");
   }
@@ -66,14 +92,15 @@ function measure(): void {
 export function initViewport(): void {
   if (!IS_IOS || !isStandalone()) return;
   document.documentElement.classList.add("sl-ios-standalone");
-  measure();
 
   // Rotation and Stage Manager resizes change the inset; iOS also reports stale
-  // dimensions for a frame or two after `orientationchange`, hence the retry.
+  // dimensions for a frame or two at launch and after `orientationchange`, hence
+  // the retry.
   const remeasure = () => {
     measure();
     setTimeout(measure, 250);
   };
+  remeasure();
   window.addEventListener("resize", remeasure);
   window.addEventListener("orientationchange", remeasure);
   window.visualViewport?.addEventListener("resize", measure);

@@ -62,6 +62,7 @@ export interface PlaybackSnapshot {
   progressMs: number;
   track: SimpleTrack | null;
   deviceName: string | null;
+  deviceId: string | null;
   shuffle: boolean;
   repeat: RepeatMode;
 }
@@ -78,6 +79,7 @@ export async function getPlaybackState(): Promise<PlaybackSnapshot | null> {
     progressMs: json.progress_ms ?? 0,
     track: toSimpleTrack(json.item),
     deviceName: json.device?.name ?? null,
+    deviceId: json.device?.id ?? null,
     shuffle: !!json.shuffle_state,
     repeat: (json.repeat_state ?? "off") as RepeatMode,
   };
@@ -98,12 +100,22 @@ export async function playTrack(uri: string, deviceId?: string): Promise<void> {
   });
 }
 
-export async function pause(): Promise<void> {
-  await req("/me/player/pause", { method: "PUT" });
+/** Play and pause throw when Spotify refuses, with the HTTP code as `status`. */
+async function command(path: string): Promise<void> {
+  const res = await req(path, { method: "PUT" });
+  if (!res.ok) throw Object.assign(new Error(`Spotify ${res.status}`), { status: res.status });
 }
 
-export async function resume(): Promise<void> {
-  await req("/me/player/play", { method: "PUT" });
+export async function pause(): Promise<void> {
+  await command("/me/player/pause");
+}
+
+/**
+ * Naming the device matters: a while after a pause Spotify no longer counts any
+ * device as active, and a bare play is then answered 404 "no active device".
+ */
+export async function resume(deviceId?: string | null): Promise<void> {
+  await command(`/me/player/play${deviceId ? `?device_id=${deviceId}` : ""}`);
 }
 
 export async function seek(positionMs: number): Promise<void> {
