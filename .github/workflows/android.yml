@@ -1,0 +1,63 @@
+name: Build Android app
+
+# Builds the Android shell (android/) and, on main, publishes it as the release
+# "android-v<run number>" — which is where the installed app looks for updates.
+#
+# One-time setup — the signing key, which every update must share (see
+# web/README.md, "Android app"):
+#   secret ANDROID_KEYSTORE_B64       base64 of the PKCS12 keystore, key alias "spicy"
+#   secret ANDROID_KEYSTORE_PASSWORD  its password
+# The page the app opens is the VITE_SPOTIFY_REDIRECT_URI variable, as for the
+# web deploy.
+
+on:
+  push:
+    branches: [main]
+    paths: ["android/**", ".github/workflows/android.yml"]
+  pull_request:
+    paths: ["android/**", ".github/workflows/android.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+
+      - name: Build APK
+        working-directory: android
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          ANDROID_KEYSTORE: ${{ runner.temp }}/release.p12
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          APP_URL: ${{ vars.VITE_SPOTIFY_REDIRECT_URI }}
+        run: |
+          echo "$KEYSTORE_B64" | base64 -d > "$ANDROID_KEYSTORE"
+          gradle assembleRelease \
+            -PversionCode=${{ github.run_number }} \
+            -PappUrl="$APP_URL" \
+            -Prepo=${{ github.repository }}
+          cp build/outputs/apk/release/*.apk "$RUNNER_TEMP/spicy-lyrics.apk"
+
+      # A pull request only proves it builds; main publishes.
+      - name: Publish release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "android-v${{ github.run_number }}" "$RUNNER_TEMP/spicy-lyrics.apk" \
+            --target "${{ github.sha }}" \
+            --title "Android v${{ github.run_number }}" \
+            --notes "Spicy Lyrics for Android, build ${{ github.run_number }}. The installed app picks this up by itself."
