@@ -252,7 +252,7 @@ function startDebug(): void {
       `playing:  ${s.isPlaying}   pos: ${(pos / 1000).toFixed(1)}s / ${(dur / 1000).toFixed(1)}s`,
       `track:    ${s.track?.name ?? "—"}`,
       `lyrics:   type=${lastLyricsInfo.type}  source=${lastLyricsInfo.source}  lines=${lastLyricsInfo.lines}  translit=${lastLyricsInfo.translit}`,
-      `viewport: inner=${window.innerHeight}  screen=${window.screen.width}x${window.screen.height}  gap=${document.documentElement.style.getPropertyValue("--sl-viewport-gap") || "—"}`,
+      `viewport: inner=${window.innerWidth}x${window.innerHeight}  screen=${window.screen.width}x${window.screen.height}  gap=${document.documentElement.style.getPropertyValue("--sl-viewport-gap") || "env"}`,
     ].join("\n");
   }, 300);
 }
