@@ -48,6 +48,14 @@ export function didSdkFail(): boolean {
   return sdkAttemptedAndFailed;
 }
 let connectTimer: number | null = null;
+// The device the mirror last saw, kept once Spotify stops reporting one: play
+// has to name it then (see api.ts resume).
+let lastDeviceId: string | null = null;
+// A play/pause sent from here shows at once; until this time, polls that still
+// say otherwise are Spotify catching up, not news.
+let intentUntil = 0;
+const INTENT_HOLD_MS = 2000;
+const errorListeners = new Set<(message: string) => void>();
 let sdkPollTimer: number | null = null;
 const listeners = new Set<UpdateListener>();
 let last: AdapterSnapshot = {
@@ -67,6 +75,11 @@ function repeatFromMode(m: number | undefined): RepeatMode {
 export function onUpdate(cb: UpdateListener): () => void {
   listeners.add(cb);
   return () => listeners.delete(cb);
+}
+
+/** A play/pause Spotify did not take, as a sentence for the user. */
+export function onPlaybackError(cb: (message: string) => void): void {
+  errorListeners.add(cb);
 }
 
 export function getMode(): PlaybackMode {
@@ -241,6 +254,8 @@ function startConnectPolling(): void {
     try {
       const startedAt = performance.now();
       const snap = await getPlaybackState();
+      if (snap?.deviceId) lastDeviceId = snap.deviceId;
+      if (performance.now() < intentUntil && (snap?.isPlaying ?? false) !== last.isPlaying) return;
       if (snap) {
         emit(
           {
@@ -254,6 +269,10 @@ function startConnectPolling(): void {
           },
           sampleMidpoint(startedAt)
         );
+      } else if (last.track) {
+        // No active device: Spotify drops it a while after a pause. The track
+        // stays up, paused where it was, rather than the page going blank.
+        if (last.isPlaying) emit({ ...last, isPlaying: false });
       } else {
         emit({
           track: null,
@@ -318,8 +337,32 @@ export async function togglePlay(): Promise<void> {
     await sdkPlayer.togglePlay();
     return;
   }
-  if (last.isPlaying) await apiPause();
-  else await apiResume();
+  await setMirrorPlaying(!last.isPlaying);
+}
+
+/** Connect mirror: play or pause the remote device. */
+async function setMirrorPlaying(playing: boolean): Promise<void> {
+  const show = (v: boolean) => {
+    setPlaying(v); // keeps the lyric clock where it is, unlike emit()
+    last = { ...last, isPlaying: v };
+    for (const l of listeners) l(last);
+  };
+  show(playing);
+  intentUntil = performance.now() + INTENT_HOLD_MS;
+  try {
+    await (playing ? apiResume(lastDeviceId) : apiPause());
+  } catch (err) {
+    const status = (err as { status?: number }).status;
+    // 403: Spotify was already in that state.
+    if (status === 403) return;
+    intentUntil = 0;
+    show(!playing);
+    const message =
+      status === 404
+        ? `Spotify ne répond plus sur « ${last.deviceName ?? "l'appareil"} ». Ouvre l'app Spotify pour relancer.`
+        : `Spotify n'a pas pris la commande (${status ?? "réseau"}).`;
+    for (const l of errorListeners) l(message);
+  }
 }
 
 export async function seekTo(positionMs: number): Promise<void> {
@@ -399,10 +442,11 @@ export async function cycleRepeat(): Promise<void> {
 
 function wireControlHooks(): void {
   (window as any).__spicySeek = (ms: number) => void seekTo(ms);
-  (window as any).__spicyPause = () => void (mode === "sdk" ? sdkPlayer?.pause() : apiPause());
-  (window as any).__spicyPlay = () => void (mode === "sdk" ? sdkPlayer?.resume() : apiResume());
+  (window as any).__spicyPause = () =>
+    void (mode === "sdk" ? sdkPlayer?.pause() : setMirrorPlaying(false));
+  (window as any).__spicyPlay = () =>
+    void (mode === "sdk" ? sdkPlayer?.resume() : setMirrorPlaying(true));
   (window as any).__spicyToggle = () => void togglePlay();
   (window as any).__spicyNext = () => void skipNext();
   (window as any).__spicyPrev = () => void skipPrev();
-  void setPlaying; // keep import referenced if unused paths are tree-shaken
 }
