@@ -10,6 +10,8 @@ import { ClearLyricsContentArrays, setRomanizedStatus } from "@src/utils/Lyrics/
 import { $currentLyricsType, $currentLyricsData, persistAtom } from "@src/utils/stores.ts";
 import { PageContainer } from "../shim/PageView.ts";
 import { SpotifyPlayer } from "../shim/SpotifyPlayer.ts";
+import { KawarpMap } from "../shim/dynamicBackground.ts";
+import { isFloating, onFloatingChange } from "../native.ts";
 import type * as AppleView from "./apple.ts";
 
 /** Settings → "Affichage Apple Music". Off = the Spicy Lyrics renderer. */
@@ -83,7 +85,10 @@ export function syncAppleChrome(): void {
   const background = on && $appleBackground.get();
   PageContainer?.classList.toggle("sl-apple", on);
   PageContainer?.classList.toggle("sl-apple-bg", background);
-  if (!background) appleView?.setAppleBackground(null);
+  if (!background) {
+    appleView?.setAppleBackground(null);
+    settleSpicyBackground();
+  }
   if (!on) return;
   void loadAppleView()
     .then((view) => {
@@ -93,6 +98,26 @@ export function syncAppleChrome(): void {
     })
     .catch((err) => console.error("[SpicyLyrics] Apple Music view failed to load", err));
 }
+
+// The animated background is most of what the page costs to render, and a
+// phone has to draw it next to the app it floats over — the lyrics stuttered.
+// So, floating (Android picture-in-picture), the background holds still: it runs
+// just long enough to settle after whatever changed it (a new cover, the window
+// being resized) and stops. apple.ts does the same for the Apple Music one.
+const SETTLE_MS = 1500;
+let settling: number | undefined;
+
+function settleSpicyBackground(): void {
+  window.clearTimeout(settling);
+  KawarpMap.forEach((spicy) => spicy.start());
+  if (!isFloating()) return;
+  settling = window.setTimeout(() => KawarpMap.forEach((spicy) => spicy.stop()), SETTLE_MS);
+}
+
+window.addEventListener("resize", () => {
+  if (isFloating() && !PageContainer?.classList.contains("sl-apple-bg")) settleSpicyBackground();
+});
+onFloatingChange(syncAppleChrome);
 
 $appleBackground.listen(syncAppleChrome);
 

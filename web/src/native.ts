@@ -28,6 +28,15 @@ export interface NativeSession {
   title: string;
 }
 
+/** The app is floating over another one (Android picture-in-picture). */
+export const isFloating = () => document.documentElement.classList.contains("sl-native-pip");
+
+const floatingListeners = new Set<() => void>();
+
+export function onFloatingChange(cb: () => void): void {
+  floatingListeners.add(cb);
+}
+
 let playing: boolean | null = null;
 
 export function setNativePlaying(next: boolean): void {
@@ -40,8 +49,10 @@ export function initNative(): void {
   if (!shell) return;
   // The app floating over another one (Android picture-in-picture): the page
   // class the small layout keys on.
-  (window as any).__spicyPip = (on: boolean) =>
+  (window as any).__spicyPip = (on: boolean) => {
     document.documentElement.classList.toggle("sl-native-pip", on);
+    floatingListeners.forEach((cb) => cb());
+  };
   document.addEventListener(
     "pointerdown",
     (e) => {
