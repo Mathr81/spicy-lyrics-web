@@ -26,8 +26,12 @@ let enabled = readEnabled(); // user preference
 let acquiring = false;
 let listening = false;
 
+// The Android app (android/): its WebView has no Wake Lock API, so the shell
+// around it holds the screen instead.
+const shell = (window as any).SpicyNative as { keepAwake(on: boolean): void } | undefined;
+
 export function wakeLockSupported(): boolean {
-  return "wakeLock" in navigator;
+  return "wakeLock" in navigator || !!shell;
 }
 
 function readEnabled(): boolean {
@@ -93,6 +97,7 @@ async function release(): Promise<void> {
 
 async function reconcile(): Promise<void> {
   if (!wakeLockSupported()) return;
+  if (shell) return shell.keepAwake(enabled && wantLock);
   if (enabled && wantLock) await acquire();
   else await release();
 }

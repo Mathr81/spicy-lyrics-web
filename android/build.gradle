@@ -1,0 +1,50 @@
+// The Android shell around the hosted web app. Built by CI
+// (.github/workflows/android.yml), which passes the properties below; an empty
+// one falls back like a missing one.
+plugins {
+    id "com.android.application" version "8.13.0"
+}
+
+def prop = { name, fallback -> findProperty(name) ?: fallback }
+
+android {
+    namespace "io.github.mathr81.spicylyrics"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "io.github.mathr81.spicylyrics"
+        minSdk 30
+        targetSdk 35
+        // The CI run number: what the updater compares against the release tags.
+        versionCode prop("versionCode", "1").toInteger()
+        versionName prop("versionCode", "1")
+        buildConfigField "String", "APP_URL", "\"${prop("appUrl", "https://mathr81.github.io/spicy-lyrics-web/")}\""
+        buildConfigField "String", "REPO", "\"${prop("repo", "Mathr81/spicy-lyrics-web")}\""
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    // No fallback to a debug key: Android only installs an update signed like
+    // the app it replaces, so a build with another key could never update.
+    signingConfigs {
+        release {
+            storeFile file(System.getenv("ANDROID_KEYSTORE") ?: "missing-keystore")
+            storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
+            keyAlias "spicy"
+            keyPassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
+        }
+    }
+
+    buildTypes {
+        release {
+            signingConfig signingConfigs.release
+        }
+    }
+}

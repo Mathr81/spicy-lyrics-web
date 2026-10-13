@@ -158,6 +158,50 @@ makes that colour follow the background — its top edge for the status bar
 as the background flows, so the bars blend into the page instead of framing it
 in black. The page still stops at the bars: only Chrome can draw under them.
 
+That is what a browser tab gets. Installed, the manifest's `"display":
+"fullscreen"` hides both bars instead (iOS has no such mode and stays
+standalone); set it back to `"standalone"` to keep the clock and battery in
+sight. To have the bars *and* the background under them, use the Android app.
+
+## Android app
+
+`android/` is a small native shell: the hosted page in a WebView drawn edge to
+edge, under transparent system bars and into the camera cutout. It loads the
+page from your web deploy, so the lyrics side updates with every deploy and
+needs no new APK. The shell also keeps the screen on while something plays (a
+WebView has no Wake Lock API) and opens outside links in the browser.
+
+`.github/workflows/android.yml` builds it on every push to `main` that touches
+`android/`, and publishes the APK as the release `android-v<run number>`.
+Install the first one by hand from the repo's Releases page; from then on the
+app updates itself: at launch it looks for a newer `android-v…` release, offers
+it, downloads it and hands it to Android's installer. Android asks for
+confirmation the first time (and to allow the app to install updates); on
+Android 12+ later updates go through without a prompt.
+
+One-time setup — the signing key. Android only installs an update signed with
+the same key as the app it replaces, so the key lives in two repository
+secrets and must never change:
+
+```bash
+openssl req -x509 -newkey rsa:2048 -nodes -days 10000 -subj "/CN=Spicy Lyrics" \
+  -keyout key.pem -out cert.pem
+openssl pkcs12 -export -inkey key.pem -in cert.pem -name spicy \
+  -out release.p12 -passout pass:YOUR_PASSWORD
+gh secret set ANDROID_KEYSTORE_B64 < <(base64 -w0 release.p12)
+gh secret set ANDROID_KEYSTORE_PASSWORD --body YOUR_PASSWORD
+```
+
+Keep `release.p12` and its password somewhere safe: lose them and the installed
+app can no longer be updated, only uninstalled and reinstalled.
+
+The page it opens is the `VITE_SPOTIFY_REDIRECT_URI` Actions variable, already
+set for the web deploy. Requires Android 11+.
+
+- Signing in to Spotify happens inside the app. Google blocks its own sign-in
+  in embedded web views, so an account that logs in to Spotify "with Google"
+  needs a Spotify password ("Forgot your password?" on the login page sets one).
+
 ### Keeping the screen on
 
 The page holds a **Screen Wake Lock** while something is playing, so the iPad
